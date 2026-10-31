@@ -1,326 +1,817 @@
 #!/usr/bin/env bash
-# ============================================================
-# argoxv6.sh — ArgoX 辅助脚本：IPv4 / IPv6 分栈代理协议管理
-# 版本：v1.0.1 (2026.10.31)
-# 项目主页：https://github.com/RNGCHEER/ARGOXV6
-# 许可证：GPL-3.0（与上游 ArgoX 相同）
+# =============================================================================
+#  argoxv6.sh  v2.0.0  (2026.10.31)
+#  ArgoX 双栈分工助手 —— ArgoX 只管 IPv4，argoxv6 只管 IPv6
+# =============================================================================
 #
-# 背景：ArgoX（https://github.com/fscarmen/ArgoX）的所有入站均为
-#       双栈监听（直连协议不设 listen）或 127.0.0.1（WS/XHTTP 走 Argo），
-#       无法为 IPv4 / IPv6 设备分别指定不同的代理协议。
-#       本辅助脚本在已安装 ArgoX 的服务器上，把新增入站精确绑定到
-#       服务器的 IPv6 地址（或 IPv4 地址），实现：
-#         * IPv6 设备走「IPv6 侧」独立协议 / 独立端口 / 独立凭据
-#         * IPv4 设备走「IPv4 侧」独立协议（或继续用 ArgoX 原有节点）
-#         * 同一端口可按栈区分协议（v6 绑具体 IPv6 地址、v4 绑具体
-#           IPv4 地址，两个 socket 互不冲突）
+#  【为什么旧版 argoxv6 会把 ArgoX 搞坏】
+#    旧版（v1.0.x）的做法是：sed 改写 /etc/systemd/system/xray.service 的
+#    ExecStart，尾部追加 -c /etc/argox/argoxv6.json。这带来 4 个硬伤：
 #
-# 前置条件：已安装 ArgoX（/etc/argox/xray、inbound.json、outbound.json 存在）
-# 集成方式：给 xray 服务追加第三个配置文件 -c /etc/argox/argoxv6.json
-#           （Xray 原生支持多配置合并，inbounds 数组合并，互不影响）
+#    1) ArgoX 每次"装/改协议"都会重写 xray.service（argox.sh 里
+#       write_xray_daemon 在 setup 流程被无条件调用），追加的那段被抹掉；
+#       反过来，一旦 argoxv6.json 被删/写坏，而 ExecStart 还引用它，
+#       xray 直接起不来 —— 表现就是"整个 ArgoX 全挂"。
+#    2) argoxv6.json 里的 listen 是写死的某个 IPv6 地址。VPS 的 IPv6
+#       前缀一变（RA 续约、换 IP），bind 失败 → 同样整个 xray 起不来。
+#    3) ArgoX 的热更新 api_hot_reload inbounds 会 rmi 掉"运行中存在但
+#       inbound.json 里没有"的所有 tag —— v6 入站每次都被人清掉。
+#    4) 旧版还把 v4 入站也绑到具体 IPv4 地址，IPv4 一变就一起挂。
 #
-# 用法：
-#   bash argoxv6.sh          # 交互菜单
-#   bash argoxv6.sh -r      # 仅修复 Xray 服务集成（ArgoX 升级/重装后）
-#   bash argoxv6.sh -l      # 仅显示节点链接
-#   bash argoxv6.sh -u      # 卸载 argoxv6（还原服务、删除配置、关防火墙）
+#  【新版怎么做的】
+#    · 不再碰 ExecStart（一行都不改）。v6 入站用 Xray 原生 gRPC API
+#      (xray api adi / rmi) 热挂载到运行中的进程上。
+#      → 配置写坏、地址失效、文件丢失，最多只是 v6 节点没了，
+#        ArgoX 的 v4 节点毫发无伤。
+#    · 服务集成只用 systemd drop-in，且脚本前缀 "-"（ExecStartPre=-...），
+#      即使 hook 文件被删、执行失败，systemd 也会忽略，绝不阻塞开机。
+#    · v4 侧：把 ArgoX inbound.json 里"没写 listen"的入站钉成 0.0.0.0，
+#      让 ArgoX 只监听 IPv4；WS/XHTTP（127.0.0.1 走 Argo 隧道）不动。
+#    · v6 侧：新入站 listen 绑本机公网 IPv6 地址，并在每次启动时自动
+#      重新探测，地址变了自动改。
+#    · 提供"调用 ArgoX"入口：菜单 1 直接拉起官方 argox.sh 管 v4，
+#      退出后自动同步（重钉 v4-only + 重挂 v6 入站）。
 #
-# 测试环境变量（一般用户无需理会）：
-#   ARGOX_DIR=...           覆盖 ArgoX 工作目录（默认 /etc/argox）
-#   XRAY_DAEMON_FILE=...    覆盖 systemd unit / OpenRC 脚本路径
-# ============================================================
+#  用法：
+#    bash argoxv6.sh            交互菜单
+#    bash argoxv6.sh -l         只输出 IPv6 节点链接
+#    bash argoxv6.sh -s         一键同步 / 自检修复
+#    bash argoxv6.sh -u         卸载（还原 ArgoX）
+#    bash argoxv6.sh -6 <addr>  手动指定 IPv6 绑定地址
+#    bash argoxv6.sh -v         版本
+#
+#  环境变量（测试/特殊场景）：
+#    ARGOX_DIR=/etc/argox   SYSTEMD_DIR=/etc/systemd/system
+#    INITD_DIR=/etc/init.d  ARGOXV6_FLAG=/run/argoxv6.need-restart
+#
+#  许可证：GPL-3.0（与上游 ArgoX 一致）
+# =============================================================================
 
 WORK_DIR="${ARGOX_DIR:-/etc/argox}"
 CUSTOM_FILE="$WORK_DIR/custom"
+IB="$WORK_DIR/inbound.json"
+OB="$WORK_DIR/outbound.json"
 V6_JSON="$WORK_DIR/argoxv6.json"
 V6_CONF="$WORK_DIR/argoxv6.conf"
+HOOK="$WORK_DIR/argoxv6-hook.sh"
+STATE_DIR="$WORK_DIR/argoxv6.d"
+SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
+INITD_DIR="${INITD_DIR:-/etc/init.d}"
+DROPIN="$SYSTEMD_DIR/xray.service.d/50-argoxv6.conf"
+OPENRC_UNIT="$INITD_DIR/argoxv6"
+FLAG="${ARGOXV6_FLAG:-/run/argoxv6.need-restart}"
 
-# 协议字母沿用 ArgoX 的命名习惯：
-#   b = VLESS + Reality Vision      （TCP，Reality 复用 ArgoX 密钥对）
-#   c = Hysteria2                   （UDP，自签证书复用 ArgoX cert）
-#   d = VLESS + Reality gRPC
-#   k = VLESS + XHTTP HTTP/3 Direct （TLS）
-#   l = Trojan Direct               （TLS）
-#   m = Shadowsocks 2022 Direct
+# ArgoX 官方主脚本
+ARGOX_URL='https://raw.githubusercontent.com/fscarmen/ArgoX/main/argox.sh'
+ARGOX_CACHE="$STATE_DIR/argox.sh"
+
+# ---------------------------------------------------------------------------
+# 协议表（字母沿用 ArgoX 习惯）
+# ---------------------------------------------------------------------------
 PROTO_LETTERS='b c d k l m'
-PROTO_NAME_b='reality-vision'
-PROTO_NAME_c='hysteria2'
-PROTO_NAME_d='reality-grpc'
-PROTO_NAME_k='xhttp-h3-direct'
-PROTO_NAME_l='trojan-direct'
-PROTO_NAME_m='ss2022-direct'
-PROTO_DESC_b='VLESS + Reality Vision'
-PROTO_DESC_c='Hysteria2'
-PROTO_DESC_d='VLESS + Reality gRPC'
-PROTO_DESC_k='VLESS + XHTTP HTTP/3 Direct'
-PROTO_DESC_l='Trojan Direct'
-PROTO_DESC_m='Shadowsocks 2022 Direct'
+PROTO_NAME_b='reality-vision';     PROTO_DESC_b='VLESS + Reality Vision'
+PROTO_NAME_c='hysteria2';          PROTO_DESC_c='Hysteria2'
+PROTO_NAME_d='reality-grpc';       PROTO_DESC_d='VLESS + Reality gRPC'
+PROTO_NAME_k='xhttp-h3-direct';    PROTO_DESC_k='VLESS + XHTTP HTTP/3 Direct'
+PROTO_NAME_l='trojan-direct';      PROTO_DESC_l='Trojan Direct'
+PROTO_NAME_m='ss2022-direct';      PROTO_DESC_m='Shadowsocks 2022 Direct'
 
-# ---------------- 输出与输入 ----------------
+# ---------------------------------------------------------------------------
+# 基础输出
+# ---------------------------------------------------------------------------
 warning() { echo -e "\033[31m\033[01m$*\033[0m"; }
-error()   { echo -e "\033[31m\033[01m$*\033[0m" && exit 1; }
+error()   { echo -e "\033[31m\033[01m$*\033[0m" >&2; exit 1; }
 info()    { echo -e "\033[32m\033[01m$*\033[0m"; }
 hint()    { echo -e "\033[33m\033[01m$*\033[0m"; }
+plain()   { echo -e "$*"; }
 
 # reading "提示语" 变量名 [默认值]
 reading() {
-  local _p="$1" _v="$2" _d="${3:-}"
+  local _p="$1" _v="$2" _d="${3:-}" _in=''
   if [ -n "$_d" ]; then
-    read -r -p "$(echo -e "$_p [$_d]: ")" "$_v" || true
-    [ -z "${!_v}" ] && eval "$_v='$_d'"
+    read -r -p "$(echo -e "$_p [$_d]: ")" _in || true
+    [ -z "$_in" ] && _in="$_d"
   else
-    read -r -p "$(echo -e "$_p ")" "$_v" || exit 0
+    read -r -p "$(echo -e "$_p ")" _in || exit 0
   fi
+  printf -v "$_v" '%s' "$_in"
 }
 
-# 按 ArgoX 的习惯解析协议选择：支持多字母批量（如 bcdlm）、a 或回车 = 全部
-# 逐字符过滤合法字母、去重、保持输入顺序（与 argox.sh xray_variable 的解析一致）
+# 多字母解析：a 或回车 = 全部；去重保序
 parse_letters() {
-  local _in="${1,,}" _ch _out=''
-  if [ -z "$_in" ] || [ "$_in" = 'a' ]; then
-    echo "$PROTO_LETTERS"
-    return 0
-  fi
-  while IFS= read -r _ch; do
+  local _in _ch _out=''
+  _in=$(echo "${1:-}" | tr 'A-Z' 'a-z')
+  if [ -z "$_in" ] || [ "$_in" = 'a' ]; then echo "$PROTO_LETTERS"; return 0; fi
+  for _ch in $(printf '%s' "$_in" | grep -o .); do
     case " $PROTO_LETTERS " in
       *" $_ch "*)
         case " $_out " in
           *" $_ch "*) : ;;
-          *) _out+="$_ch " ;;
+          *) _out="$_out $_ch" ;;
         esac ;;
     esac
-  done < <(grep -o . <<< "$_in")
-  echo "${_out% }"
+  done
+  echo "${_out# }"
 }
 
-# ---------------- 通用工具 ----------------
-jq_bin() {
-  if [ -x "$WORK_DIR/jq" ]; then echo "$WORK_DIR/jq"
-  elif command -v jq >/dev/null 2>&1; then command -v jq
-  else error " 未找到 jq，无法解析配置。请先完成 ArgoX 安装（自带 jq）。"; fi
-}
+proto_name() { eval echo "\$PROTO_NAME_$1"; }
+proto_desc() { eval echo "\$PROTO_DESC_$1"; }
 
-gen_uuid() {
-  [ -r /proc/sys/kernel/random/uuid ] && cat /proc/sys/kernel/random/uuid && return
-  command -v uuidgen >/dev/null 2>&1 && uuidgen | tr 'A-Z' 'a-z' && return
-  openssl rand -hex 16 | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/'
-}
-
-is_v4() { [[ "$1" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; }
-is_v6() { [[ "$1" =~ : ]]; }
-
-# ---------------- conf 读写（key=value 带单引号，可被 . 加载） ----------------
-write_conf() {
-  local _K="$1" _V="$2"
-  if [ -s "$V6_CONF" ] && grep -q "^${_K}=" "$V6_CONF"; then
-    sed -i "s|^${_K}=.*|${_K}='${_V}'|" "$V6_CONF"
-  else
-    echo "${_K}='${_V}'" >> "$V6_CONF"
+# ---------------------------------------------------------------------------
+# JSON 工具：ArgoX 的配置文件可能带 // 注释行，jq 前先剥掉
+# ---------------------------------------------------------------------------
+find_jq() {
+  local _j=''
+  if [ -x "$WORK_DIR/jq" ]; then _j="$WORK_DIR/jq"
+  elif command -v jq >/dev/null 2>&1; then _j=$(command -v jq)
   fi
+  echo "$_j"
+}
+
+need_jq() {
+  JQ=$(find_jq)
+  [ -n "$JQ" ] || error " 未找到 jq（$WORK_DIR/jq 或系统 jq），请先完成 ArgoX 安装。"
+}
+
+json_of() { grep -vE '^[[:space:]]*//' "$1" 2>/dev/null; }
+ibjq()    { json_of "$IB" | "$JQ" "$@"; }
+
+# ---------------------------------------------------------------------------
+# conf（argoxv6.conf，key='value'）
+# ---------------------------------------------------------------------------
+write_conf() {
+  local _K="$1" _V="$2" _tmp
+  mkdir -p "$(dirname "$V6_CONF")"
+  [ -s "$V6_CONF" ] || : > "$V6_CONF"
+  _tmp="$V6_CONF.tmp.$$"
+  if grep -q "^${_K}=" "$V6_CONF" 2>/dev/null; then
+    sed "s|^${_K}=.*|${_K}='${_V}'|" "$V6_CONF" > "$_tmp" && cat "$_tmp" > "$V6_CONF"
+  else
+    { cat "$V6_CONF"; echo "${_K}='${_V}'"; } > "$_tmp" && cat "$_tmp" > "$V6_CONF"
+  fi
+  rm -f "$_tmp"
 }
 
 conf_get() {
   [ -s "$V6_CONF" ] || return 0
   local _v
-  _v=$(grep "^$1=" "$V6_CONF" | head -n1 | cut -d= -f2-)
+  _v=$(grep "^$1=" "$V6_CONF" 2>/dev/null | head -n1 | cut -d= -f2-)
   echo "${_v//\'/}"
 }
 
 del_conf_prefix() {
   [ -s "$V6_CONF" ] || return 0
-  sed -i "/^$1/d" "$V6_CONF"
+  local _tmp="$V6_CONF.tmp.$$"
+  grep -v "^$1" "$V6_CONF" > "$_tmp" 2>/dev/null
+  cat "$_tmp" > "$V6_CONF"
+  rm -f "$_tmp"
 }
 
 load_conf() {
-  WAN4='' WAN6='' NODE_NAME=''
+  V6_BIND='' V6_PUB='' NODE_NAME='' HOOKS=''
   [ -s "$V6_CONF" ] && . "$V6_CONF"
 }
 
-# 列出已配置条目：输出 "FAM LETTER PORT"
+item_key() { echo "ITEM_$1_$2_$3"; }   # FAM LETTER FIELD -> conf key
+
+# 列出条目：每行 "6 b 35000"
 list_items() {
   [ -s "$V6_CONF" ] || return 0
-  sed -n "s/^ITEM_\([46]\)_\([bcdklm]\)_PORT='\{0,1\}\([0-9]\+\)'\{0,1\}$/\1 \2 \3/p" "$V6_CONF" | sort
+  sed -n "s/^ITEM_6_\([bcdklm]\)_PORT='\{0,1\}\([0-9]\+\)'\{0,1\}$/6 \1 \2/p" "$V6_CONF" | sort
 }
 
-item_key() { echo "ITEM_$1_$2_$3"; }   # FAM LETTER FIELD
+item_tag() { echo "$NODE_NAME argoxv6-v6-$(proto_name "$1")"; }
 
-# ---------------- ArgoX 环境探测 ----------------
-# 未检测到 ArgoX 时可选一键安装（调用 ArgoX 官方脚本，交互式）
+# ---------------------------------------------------------------------------
+# ArgoX 环境
+# ---------------------------------------------------------------------------
+argox_installed() { [ -s "$IB" ] && [ -s "$OB" ]; }
+
 ensure_argox() {
-  [ -s "$WORK_DIR/inbound.json" ] && [ -s "$WORK_DIR/outbound.json" ] && return 0
+  argox_installed && return 0
   echo ''
-  warning " 未检测到 ArgoX 安装（$WORK_DIR/inbound.json 不存在）。"
-  hint " argoxv6 需要在 ArgoX 之上工作。可现在一键安装 ArgoX（官方脚本，交互式），或选 n 自行安装。"
-  local _ok
-  reading " 是否现在安装 ArgoX？(y/n)" _ok 'n'
-  [ "$_ok" = 'y' ] || error " 已取消。请先安装 ArgoX 后重新运行 argoxv6：bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/ArgoX/main/argox.sh)"
-  echo ''
-  info " 正在启动 ArgoX 官方安装脚本 ..."
-  if command -v wget >/dev/null 2>&1; then
-    bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/ArgoX/main/argox.sh)
-  else
-    bash <(curl -fsSL https://raw.githubusercontent.com/fscarmen/ArgoX/main/argox.sh)
+  warning " 未检测到 ArgoX 安装（$IB 不存在）。"
+  hint " argoxv6 只是 ArgoX 的 IPv6 侧补充，需要先有 ArgoX。"
+  if [ ! -t 0 ]; then
+    error " 请先安装 ArgoX：bash <(wget -qO- $ARGOX_URL)"
   fi
-  [ -s "$WORK_DIR/inbound.json" ] && [ -s "$WORK_DIR/outbound.json" ] || \
-    error " ArgoX 安装未完成或被取消，argoxv6 无法继续。"
-  info " ArgoX 已就绪，继续 argoxv6 流程。"
+  local _ok
+  reading " 现在安装 ArgoX？(y/n)" _ok 'y'
+  [ "$_ok" = 'y' ] || error " 已取消。"
+  run_argox_script || error " ArgoX 安装未完成。"
+  argox_installed || error " ArgoX 安装后仍未找到 $IB。"
 }
 
+XRAY=''
 load_argox() {
   ensure_argox
-  [ -x "$WORK_DIR/xray" ] || hint " 提示：未找到 $WORK_DIR/xray，密钥生成与配置校验可能受限。"
-  JQ=$(jq_bin)
+  need_jq
+  XRAY="$WORK_DIR/xray"
 
-  # custom：language / serverIp / privateKey / publicKey / cdn ...
-  [ -s "$CUSTOM_FILE" ] && . "$CUSTOM_FILE"
+  # 系统初始化方式
+  if [ -f "$SYSTEMD_DIR/xray.service" ] || command -v systemctl >/dev/null 2>&1; then
+    SYSINIT='systemd'
+    [ -f "$INITD_DIR/xray" ] && command -v rc-service >/dev/null 2>&1 && [ ! -d "$SYSTEMD_DIR" ] && SYSINIT='openrc'
+  elif [ -f "$INITD_DIR/xray" ]; then
+    SYSINIT='openrc'
+  else
+    SYSINIT='unknown'
+  fi
 
-  # 已保存的 argoxv6 配置
-  load_conf
+  # ArgoX custom：language / serverIp / privateKey / publicKey / cdn / fingerprint ...
+  REALITY_PRIVATE='' REALITY_PUBLIC='' FINGER_PRINT='' TLS_SERVER=''
+  if [ -s "$CUSTOM_FILE" ]; then
+    . "$CUSTOM_FILE"
+    REALITY_PRIVATE="${privateKey:-}"
+    REALITY_PUBLIC="${publicKey:-}"
+    FINGER_PRINT="${fingerprint:-}"
+    SERVER_IP="${serverIp:-}"
+    [ "${REALITY_PRIVATE}" = '__KEY_UNSET__' ] && REALITY_PRIVATE=''
+    [ "${REALITY_PUBLIC}"  = '__KEY_UNSET__' ] && REALITY_PUBLIC=''
+  fi
 
-  # 节点名称：沿用 ArgoX 习惯（主机名）
-  [ -z "$NODE_NAME" ] && NODE_NAME=$(hostname 2>/dev/null || echo 'ArgoX')
-  NODE_NAME="argoxv6-${NODE_NAME// /-}"
-
-  # 从 ArgoX inbound.json 提取 Reality 密钥对与 TLS SNI（有则复用）
-  local _ib
-  _ib=$(grep -vE '^[[:space:]]*//' "$WORK_DIR/inbound.json")
-  if [ -n "$($JQ -r '[.inbounds[]? | select(.streamSettings.security == "reality")][0] // empty' <<< "$_ib" 2>/dev/null)" ]; then
-    REALITY_PRIVATE=$($JQ -r '[.inbounds[]? | select(.streamSettings.security=="reality")][0].streamSettings.realitySettings.privateKey // empty' <<< "$_ib")
-    REALITY_PUBLIC=$($JQ -r '[.inbounds[]? | select(.streamSettings.security=="reality")][0].streamSettings.realitySettings.publicKey // empty' <<< "$_ib")
-    local _sni _dest
-    _sni=$($JQ -r '[.inbounds[]? | select(.streamSettings.security=="reality")][0].streamSettings.realitySettings.serverNames[0] // empty' <<< "$_ib")
-    _dest=$($JQ -r '[.inbounds[]? | select(.streamSettings.security=="reality")][0].streamSettings.realitySettings.dest // empty' <<< "$_ib")
+  # Reality 密钥 / SNI / 证书：优先从 ArgoX 的 inbound.json 里抄，保证互通
+  local _rk _sni _dest _cf _kf
+  _rk=$(ibjq -c '[.inbounds[]? | select(.streamSettings.security == "reality")][0] // empty' 2>/dev/null)
+  if [ -n "$_rk" ]; then
+    [ -z "$REALITY_PRIVATE" ] && REALITY_PRIVATE=$("$JQ" -r '.streamSettings.realitySettings.privateKey // empty' <<< "$_rk")
+    [ -z "$REALITY_PUBLIC" ]  && REALITY_PUBLIC=$("$JQ" -r '.streamSettings.realitySettings.publicKey // empty' <<< "$_rk")
+    _sni=$("$JQ" -r '.streamSettings.realitySettings.serverNames[0] // empty' <<< "$_rk")
+    _dest=$("$JQ" -r '.streamSettings.realitySettings.dest // empty' <<< "$_rk")
     [ -n "$_sni" ] && TLS_SERVER="$_sni"
-    [ -n "$_dest" ] && TLS_SERVER="${TLS_SERVER:-${_dest%:*}}"
+    [ -z "$TLS_SERVER" ] && [ -n "$_dest" ] && TLS_SERVER="${_dest%:*}"
+  fi
+  if [ -z "$TLS_SERVER" ]; then
+    TLS_SERVER=$(ibjq -r '[.inbounds[]? | select(.streamSettings.network == "hysteria") | .streamSettings.tlsSettings.serverNames[0]][0] // empty' 2>/dev/null)
+  fi
+  if [ -z "$TLS_SERVER" ] && [ -s "$WORK_DIR/cert/cert.pem" ] && command -v openssl >/dev/null 2>&1; then
+    TLS_SERVER=$(openssl x509 -noout -ext subjectAltName -in "$WORK_DIR/cert/cert.pem" 2>/dev/null | awk -F 'DNS:' '/DNS:/{gsub(/,.*/,"",$2); print $2; exit}')
   fi
   TLS_SERVER="${TLS_SERVER:-addons.mozilla.org}"
+  FINGER_PRINT="${FINGER_PRINT:-chrome}"
 
-  # 证书路径：优先复用 ArgoX 自签证书
-  local _cf _kf
-  _cf=$($JQ -r '[.inbounds[]?.streamSettings.tlsSettings.certificates[]?.certificateFile][0] // empty' <<< "$_ib" 2>/dev/null)
-  _kf=$($JQ -r '[.inbounds[]?.streamSettings.tlsSettings.certificates[]?.keyFile][0] // empty' <<< "$_ib" 2>/dev/null)
+  CERT_FILE='' CERT_KEY=''
+  _cf=$(ibjq -r '[.inbounds[]? | .streamSettings.tlsSettings.certificates[]?.certificateFile][0] // empty' 2>/dev/null)
+  _kf=$(ibjq -r '[.inbounds[]? | .streamSettings.tlsSettings.certificates[]?.keyFile][0] // empty' 2>/dev/null)
   [ -n "$_cf" ] && [ -s "$_cf" ] && CERT_FILE="$_cf"
   [ -n "$_kf" ] && [ -s "$_kf" ] && CERT_KEY="$_kf"
-}
-
-# ---------------- 公网 IP 探测 ----------------
-detect_wan() {
-  local _o4 _o6
-  _o4=$(wget -4 -qO- --tries=2 --timeout=4 https://ip.cloudflare.now.cc 2>/dev/null \
-        | awk -F'"' '/"ip"/{print $4; exit}')
-  _o6=$(wget -6 -qO- --tries=2 --timeout=4 https://ip.cloudflare.now.cc 2>/dev/null \
-        | awk -F'"' '/"ip"/{print $4; exit}')
-  [ -z "$_o4" ] && _o4=$(curl -4 -s --max-time 4 https://api.ipify.org 2>/dev/null)
-  [ -z "$_o6" ] && _o6=$(curl -6 -s --max-time 4 https://api64.ipify.org 2>/dev/null)
-  [ -z "$_o4" ] && _o4=$(ip -4 addr show scope global 2>/dev/null | sed -n 's#.*inet \([^/]\+\)/.*#\1#p' | head -n1)
-  [ -z "$_o6" ] && _o6=$(ip -6 addr show scope global 2>/dev/null | sed -n 's#.*inet6 \([^/]\+\)/.*#\1#p' | head -n1)
-  is_v4 "$_o4" && WAN4="$_o4"
-  is_v6 "$_o6" && WAN6="$_o6"
-  write_conf 'WAN4' "$WAN4"
-  write_conf 'WAN6' "$WAN6"
-}
-
-fam_addr() { [ "$1" = '6' ] && echo "$WAN6" || echo "$WAN4"; }
-fam_name() { [ "$1" = '6' ] && echo 'IPv6' || echo 'IPv4'; }
-
-# 链接里的主机：IPv6 需方括号
-host_for_link() { is_v6 "$1" && echo "[$1]" || echo "$1"; }
-
-# ---------------- 端口工具 ----------------
-# ArgoX 已占用端口（其直连入站为双栈监听，一律视为冲突）
-argox_ports() {
-  grep -vE '^[[:space:]]*//' "$WORK_DIR/inbound.json" | $JQ -r '.inbounds[]?.port // empty' 2>/dev/null
-}
-
-is_port_conflict() {   # $1=port $2=fam
-  local _p="$1" _f="$2" _used
-  _used=$(argox_ports)
-  grep -qx "$_p" <<< "$_used" && return 0
-  # ss 实时监听（0.0.0.0 / :: 的双栈监听对两个家族都冲突）
-  if command -v ss >/dev/null 2>&1; then
-    ss -lntuH 2>/dev/null | awk '{print $5}' | grep -oE '[0-9]+$' | grep -qx "$_p" && return 0
+  if [ -z "$CERT_FILE" ] && [ -s "$WORK_DIR/cert/cert.pem" ]; then
+    CERT_FILE="$WORK_DIR/cert/cert.pem"
+    CERT_KEY="$WORK_DIR/cert/private.key"
   fi
-  # argoxv6 自身：同家族冲突、异家族同端口允许（绑不同地址）
-  local _it
-  while read -r _it; do
-    [ -z "$_it" ] && continue
-    set -- $_it   # $1=fam $2=letter $3=port
-    [ "$3" = "$_p" ] && [ "$1" = "$_f" ] && return 0
-    done < <(list_items)
+
+  # 节点名沿用 ArgoX 习惯（inbound tag 去掉最后一段）
+  local _n
+  _n=$(ibjq -r '.inbounds[0].tag // empty' 2>/dev/null | sed 's/ [^ ]*$//')
+  load_conf
+  NODE_NAME="${NODE_NAME:-${_n:-$(hostname 2>/dev/null || echo ArgoX)}}"
+}
+
+# ---------------------------------------------------------------------------
+# IPv6 地址探测：绑定地址（本机 GUA）与公网地址（写进链接）分开
+# ---------------------------------------------------------------------------
+detect_v6_bind() {
+  local _if _a=''
+  _if=$(ip -6 route show default 2>/dev/null | awk '/default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+  if [ -n "$_if" ]; then
+    _a=$(ip -6 addr show dev "$_if" 2>/dev/null | sed -n 's#.*inet6 \([^/]*\)/[0-9]*.*global.*#\1#p' | head -n1)
+  fi
+  if [ -z "$_a" ]; then
+    _a=$(ip -6 addr show scope global 2>/dev/null | sed -n 's#.*inet6 \([^/]*\)/[0-9]*.*global.*#\1#p' | grep -v '^fe80' | head -n1)
+  fi
+  echo "$_a"
+}
+
+detect_v6_pub() {
+  local _a=''
+  command -v curl >/dev/null 2>&1 && \
+    _a=$(curl -6 -fsS --max-time 5 https://ipv6.icanhazip.com 2>/dev/null | head -n1)
+  if [ -z "$_a" ] && command -v wget >/dev/null 2>&1; then
+    _a=$(wget -6 -qO- --tries=1 --timeout=5 https://ipv6.icanhazip.com 2>/dev/null | head -n1)
+  fi
+  if [ -z "$_a" ] && command -v curl >/dev/null 2>&1; then
+    _a=$(curl -6 -fsS --max-time 5 https://ip.cloudflare.now.cc 2>/dev/null | awk -F'"' '/"ip"/{print $4; exit}')
+  fi
+  echo "$_a" | tr -d '\r\n'
+}
+
+is_v6() { [[ "$1" == *:* ]]; }
+
+# 探测并落盘；地址变化时返回 0（表示需要重建 v6 配置）
+detect_v6() {
+  [ -n "${V6_OVERRIDE:-}" ] && return 1     # 命令行强制指定时不自动覆盖
+  local _new _pub _old
+  _new=$(detect_v6_bind)
+  _pub=$(detect_v6_pub)
+  is_v6 "$_pub" || _pub="$_new"
+  _old=$(conf_get V6_BIND)
+
+  V6_BIND="${_new:-$_old}"
+  V6_PUB="${_pub:-$V6_BIND}"
+  [ -n "$V6_BIND" ] && write_conf 'V6_BIND' "$V6_BIND"
+  [ -n "$V6_PUB" ]  && write_conf 'V6_PUB'  "$V6_PUB"
+
+  [ -n "$_new" ] && [ "$_new" != "$_old" ] && return 0
   return 1
 }
 
-suggest_port() {   # $1=fam
+host_for_link() { is_v6 "$1" && echo "[$1]" || echo "$1"; }
+
+# ---------------------------------------------------------------------------
+# Xray API（v6 入站的生命线，全程只走 API，不碰服务文件）
+# ---------------------------------------------------------------------------
+_API=''
+api_addr() {
+  [ -n "$_API" ] && { echo "$_API"; return 0; }
+  local _p=''
+  _p=$(ibjq -r '.api.listen // empty' 2>/dev/null | awk -F: '{print $NF}')
+  if [ -n "$_p" ]; then
+    _API="127.0.0.1:$_p"
+    echo "$_API"
+    return 0
+  fi
+  # 兜底：扫进程监听的本地端口，逐个试
+  local _lp
+  for _lp in $(ss -tlnp 2>/dev/null | grep -i '[x]ray' | grep -oE '127\.0\.0\.1:[0-9]+' | awk -F: '{print $2}' | sort -un); do
+    if [ -x "$XRAY" ] && "$XRAY" api lsi --server="127.0.0.1:$_lp" >/dev/null 2>&1; then
+      _API="127.0.0.1:$_lp"
+      echo "$_API"
+      return 0
+    fi
+  done
+  return 1
+}
+
+api_ready() {
+  [ -x "$XRAY" ] || return 1
+  local _a; _a=$(api_addr) || return 1
+  "$XRAY" api lsi --server="$_a" >/dev/null 2>&1
+}
+
+wait_api() {
+  local _t="${1:-15}" _i=0
+  while [ "$_i" -lt "$_t" ]; do
+    api_ready && return 0
+    _i=$((_i + 1))
+    sleep 1
+  done
+  return 1
+}
+
+# 运行中的 tag 列表（每行一个，tag 里可能有空格，必须按行读）
+live_tags_file() {
+  local _out _f="$1"
+  : > "$_f"
+  [ -x "$XRAY" ] || return 0
+  local _a; _a=$(api_addr) || return 0
+  _out=$("$XRAY" api lsi --server="$_a" --isOnlyTags=true 2>/dev/null | tr -d '\r')
+  [ -z "$_out" ] && return 0
+  if printf '%s' "$_out" | "$JQ" -r '.inbounds[]?.tag // empty' 2>/dev/null | tr -d '\r' > "$_f" && [ -s "$_f" ]; then
+    return 0
+  fi
+  printf '%s\n' "$_out" | tr -d '\r' | tr -d '"' | tr -d '[]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
+    | grep -v '^,\{0,1\}$' | grep -v '^[{}[]' > "$_f"
+}
+
+xray_active() {
+  case "$SYSINIT" in
+    systemd) systemctl is-active xray >/dev/null 2>&1 ;;
+    openrc)  rc-service xray status >/dev/null 2>&1 ;;
+    *)       ps -eo args 2>/dev/null | grep -q "[x]ray run" ;;
+  esac
+}
+
+restart_xray() {
+  case "$SYSINIT" in
+    systemd)
+      systemctl daemon-reload >/dev/null 2>&1
+      systemctl restart xray >/dev/null 2>&1 ;;
+    openrc)
+      rc-service xray restart >/dev/null 2>&1 ;;
+    *)
+      warning " 无法识别服务管理器，请手动重启 xray。"
+      return 1 ;;
+  esac
+  wait_api 20 && return 0
+  warning " Xray 重启后 API 未就绪，请执行：systemctl status xray -l  排查。"
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# v4 侧加固：把 ArgoX"没写 listen"的入站钉成 0.0.0.0（= 只听 IPv4）
+#   · 只动 listen 字段缺失或为 "::" 的入站
+#   · 127.0.0.1（WS/XHTTP 走 Argo 隧道）一律不碰
+#   · 写坏就整体回滚，绝不留下半截文件
+# ---------------------------------------------------------------------------
+V4_TMP="$WORK_DIR/.inbound.v4tmp"
+
+v4_patch() {
+  [ -s "$IB" ] || return 1
+  local _n
+  _n=$(ibjq -r '[.inbounds[]? | select((.listen // "") == "" or .listen == "::")] | length' 2>/dev/null)
+  [ -z "$_n" ] && return 1
+  [ "$_n" = '0' ] && return 0
+
+  json_of "$IB" | "$JQ" '(.inbounds[]? | select((.listen // "") == "" or .listen == "::")) |= (. + {listen: "0.0.0.0"})' > "$V4_TMP" 2>/dev/null
+  if [ ! -s "$V4_TMP" ] || ! "$JQ" empty "$V4_TMP" >/dev/null 2>&1; then
+    rm -f "$V4_TMP"
+    warning " 生成 IPv4-only 配置失败，已放弃（ArgoX 保持原样，不影响使用）。"
+    return 1
+  fi
+  cat "$V4_TMP" > "$IB"
+  rm -f "$V4_TMP"
+  return 0
+}
+
+# 还原成 ArgoX 原生的双栈监听
+v4_unpatch() {
+  [ -s "$IB" ] || return 1
+  local _n
+  _n=$(ibjq -r '[.inbounds[]? | select(.listen == "0.0.0.0")] | length' 2>/dev/null)
+  [ -z "$_n" ] && return 1
+  [ "$_n" = '0' ] && return 0
+
+  json_of "$IB" | "$JQ" '(.inbounds[]? | select(.listen == "0.0.0.0")) |= del(.listen)' > "$V4_TMP" 2>/dev/null
+  if [ ! -s "$V4_TMP" ] || ! "$JQ" empty "$V4_TMP" >/dev/null 2>&1; then
+    rm -f "$V4_TMP"
+    warning " 还原双栈配置失败，请手动检查 $IB。"
+    return 1
+  fi
+  cat "$V4_TMP" > "$IB"
+  rm -f "$V4_TMP"
+  return 0
+}
+
+v4_state() {
+  local _n
+  _n=$(ibjq -r '[.inbounds[]? | select((.listen // "") == "" or .listen == "::")] | length' 2>/dev/null)
+  if [ "$_n" = '0' ]; then echo 'v4only'; else echo 'dual'; fi
+}
+
+v4_summary() {
+  ibjq -r '.inbounds[]? | "\(.tag // "-")\t\(.listen // "双栈")\t\(.port // "-")"' 2>/dev/null | while IFS="$(printf '\t')" read -r _tag _ls _pt; do
+    [ -z "$_tag" ] && continue
+    plain "   ${_pt} | ${_ls} | ${_tag}"
+  done
+}
+
+# ---------------------------------------------------------------------------
+# hook 脚本（独立文件，被 systemd / OpenRC 调用；也可被主脚本直接调用）
+#   pre  : 钉 v4-only + 修正 v6 地址        （在 xray 启动前）
+#   post : 用 API 把 v6 入站挂到运行中的 xray （在 xray 启动后）
+#   两个动作都保证 exit 0，任何异常都不影响 ArgoX
+# ---------------------------------------------------------------------------
+write_hook() {
+  mkdir -p "$WORK_DIR"
+  {
+    echo '#!/bin/sh'
+    echo '# 由 argoxv6 自动生成，请勿手工编辑。所有失败都静默，绝不阻塞 Xray 启动。'
+    echo "WORK_DIR='$WORK_DIR'"
+    echo "FLAG='$FLAG'"
+    echo "MODE=\"\${1:-pre}\""
+    cat << 'HOOK_BODY'
+
+IB="$WORK_DIR/inbound.json"
+V6_JSON="$WORK_DIR/argoxv6.json"
+V6_CONF="$WORK_DIR/argoxv6.conf"
+XRAY="$WORK_DIR/xray"
+
+find_jq() {
+  if [ -x "$WORK_DIR/jq" ]; then echo "$WORK_DIR/jq"; return; fi
+  command -v jq 2>/dev/null
+}
+
+usable() { [ -x "$XRAY" ] && [ -n "$(find_jq)" ]; }
+
+patch_v4() {
+  JQ=$(find_jq); [ -n "$JQ" ] || return 0
+  [ -s "$IB" ] || return 0
+  TMP="$WORK_DIR/.inbound.hook.$$"
+  grep -vE '^[[:space:]]*//' "$IB" \
+    | "$JQ" '(.inbounds[]? | select((.listen // "") == "" or .listen == "::")) |= (. + {listen: "0.0.0.0"})' \
+    > "$TMP" 2>/dev/null || { rm -f "$TMP"; return 0; }
+  if [ ! -s "$TMP" ] || ! "$JQ" empty "$TMP" >/dev/null 2>&1; then rm -f "$TMP"; return 0; fi
+  if cmp -s "$TMP" "$IB"; then rm -f "$TMP"; return 0; fi
+  cat "$TMP" > "$IB" && rm -f "$TMP"
+  : > "$FLAG" 2>/dev/null
+}
+
+detect_v6() {
+  IF=$(ip -6 route show default 2>/dev/null | awk '/default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+  if [ -n "$IF" ]; then
+    A=$(ip -6 addr show dev "$IF" 2>/dev/null | sed -n 's#.*inet6 \([^/]*\)/[0-9]*.*global.*#\1#p' | head -n1)
+  fi
+  [ -z "$A" ] && A=$(ip -6 addr show scope global 2>/dev/null | sed -n 's#.*inet6 \([^/]*\)/[0-9]*.*global.*#\1#p' | grep -v '^fe80' | head -n1)
+  echo "$A"
+}
+
+refresh_v6() {
+  JQ=$(find_jq); [ -n "$JQ" ] || return 0
+  [ -s "$V6_JSON" ] || return 0
+  NEW=$(detect_v6); [ -n "$NEW" ] || return 0
+  OLD=$("$JQ" -r '[.inbounds[]?.listen // empty] | .[0] // empty' "$V6_JSON" 2>/dev/null)
+  [ -n "$OLD" ] || return 0
+  [ "$OLD" = "$NEW" ] && return 0
+  sed -i "s|\"listen\"[[:space:]]*:[[:space:]]*\"$OLD\"|\"listen\": \"$NEW\"|g" "$V6_JSON" 2>/dev/null
+  [ -s "$V6_CONF" ] && sed -i "s|^V6_BIND=.*|V6_BIND='$NEW'|" "$V6_CONF" 2>/dev/null
+  return 0
+}
+
+api_addr() {
+  JQ=$(find_jq); [ -n "$JQ" ] || return 1
+  P=$(grep -vE '^[[:space:]]*//' "$IB" 2>/dev/null | "$JQ" -r '.api.listen // empty' 2>/dev/null | awk -F: '{print $NF}')
+  [ -n "$P" ] || return 1
+  echo "127.0.0.1:$P"
+}
+
+hash_of() {
+  if command -v md5sum >/dev/null 2>&1; then md5sum "$1" 2>/dev/null | awk '{print $1}'
+  elif command -v cksum >/dev/null 2>&1; then cksum "$1" 2>/dev/null | awk '{print $1"-"$2}'
+  fi
+}
+
+ensure_v6() {
+  usable || return 0
+  [ -s "$V6_JSON" ] || return 0
+  JQ=$(find_jq)
+  API=$(api_addr) || return 0
+  I=0
+  while [ $I -lt 20 ]; do
+    "$XRAY" api lsi --server="$API" >/dev/null 2>&1 && break
+    I=$((I+1)); sleep 0.5
+  done
+  "$XRAY" api lsi --server="$API" >/dev/null 2>&1 || return 0
+
+  CNT=$("$JQ" '.inbounds | length' "$V6_JSON" 2>/dev/null)
+  [ -n "$CNT" ] || return 0
+  [ "$CNT" -gt 0 ] || return 0
+
+  TAGS="$WORK_DIR/.hooktags.$$"
+  LIVE="$WORK_DIR/.hooklive.$$"
+  "$JQ" -r '.inbounds[]?.tag // empty' "$V6_JSON" 2>/dev/null | tr -d '\r' > "$TAGS"
+  OUT=$("$XRAY" api lsi --server="$API" --isOnlyTags=true 2>/dev/null | tr -d '\r')
+  if printf '%s' "$OUT" | "$JQ" -r '.inbounds[]?.tag // empty' 2>/dev/null | tr -d '\r' > "$LIVE" && [ -s "$LIVE" ]; then
+    :
+  else
+    printf '%s\n' "$OUT" | tr -d '\r' | tr -d '"' | tr -d '[]' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' | grep -v '^,\{0,1\}$' | grep -v '^[{}[]' > "$LIVE"
+  fi
+
+  # 1) 清掉历史残留的 argoxv6 入站（不在当前配置里的）
+  while IFS= read -r T; do
+    [ -z "$T" ] && continue
+    case "$T" in
+      *argoxv6*) grep -qxF "$T" "$TAGS" || "$XRAY" api rmi --server="$API" "$T" >/dev/null 2>&1 ;;
+    esac
+  done < "$LIVE"
+
+  # 2) 按需重挂：配置没变且该入站已在运行 → 完全不动它（避免无谓断连）
+  NOW=$(hash_of "$V6_JSON")
+  OLD=$(cat "$V6_JSON.hash" 2>/dev/null)
+  I=0
+  while [ $I -lt "$CNT" ]; do
+    T=$("$JQ" -r ".inbounds[$I].tag // empty" "$V6_JSON" 2>/dev/null | tr -d '\r')
+    if [ -n "$NOW" ] && [ "$NOW" = "$OLD" ] && [ -n "$T" ] && grep -qxF "$T" "$LIVE"; then
+      I=$((I+1)); continue
+    fi
+    F="$WORK_DIR/.hookadi.$$"
+    "$JQ" -c "{inbounds: [.inbounds[$I]]}" "$V6_JSON" > "$F" 2>/dev/null
+    if [ -s "$F" ]; then
+      [ -n "$T" ] && "$XRAY" api rmi --server="$API" "$T" >/dev/null 2>&1
+      "$XRAY" api adi --server="$API" "$F" >/dev/null 2>&1
+    fi
+    rm -f "$F"
+    I=$((I+1))
+  done
+
+  [ -n "$NOW" ] && echo "$NOW" > "$V6_JSON.hash" 2>/dev/null
+  rm -f "$TAGS" "$LIVE"
+  return 0
+}
+
+case "$MODE" in
+  pre)
+    patch_v4
+    refresh_v6
+    ;;
+  post)
+    if [ -f "$FLAG" ] && command -v rc-service >/dev/null 2>&1 && [ ! -d /etc/systemd/system ]; then
+      rc-service xray restart >/dev/null 2>&1
+      rm -f "$FLAG"
+    fi
+    ensure_v6
+    ;;
+esac
+exit 0
+HOOK_BODY
+  } > "$HOOK"
+  chmod 755 "$HOOK"
+}
+
+hooks_installed() {
+  case "$SYSINIT" in
+    systemd) [ -f "$DROPIN" ] && [ -x "$HOOK" ] ;;
+    openrc)  [ -x "$OPENRC_UNIT" ] && [ -x "$HOOK" ] ;;
+    *)       [ -x "$HOOK" ] ;;
+  esac
+}
+
+install_hooks() {
+  write_hook
+  case "$SYSINIT" in
+    systemd)
+      mkdir -p "$(dirname "$DROPIN")"
+      cat > "$DROPIN" << EOF
+# 由 argoxv6 生成。只做两件事，且都以 "-" 前缀忽略失败：
+#   pre  → 把 ArgoX 直连入站钉成 0.0.0.0（IPv4-only）+ 校正 v6 地址
+#   post → 用 Xray API 把 v6 入站热挂到运行中的进程
+# 即使本 hook 被删除或执行失败，Xray / ArgoX 仍能正常启动。
+[Service]
+ExecStartPre=-$HOOK pre
+ExecStartPost=-$HOOK post
+EOF
+      systemctl daemon-reload >/dev/null 2>&1
+      ;;
+    openrc)
+      cat > "$OPENRC_UNIT" << EOF
+#!/sbin/openrc-run
+name="argoxv6"
+description="argoxv6 IPv6 side guard for ArgoX"
+
+depend() { need xray; after xray; }
+
+start() {
+    ebegin "argoxv6: sync IPv6 inbounds"
+    $HOOK pre
+    if [ -f $FLAG ]; then rc-service xray restart >/dev/null 2>&1; rm -f $FLAG; fi
+    $HOOK post
+    eend 0
+}
+EOF
+      chmod 755 "$OPENRC_UNIT"
+      rc-update add argoxv6 default >/dev/null 2>&1
+      ;;
+  esac
+  write_conf 'HOOKS' 'yes'
+  if [ "$SYSINIT" = 'unknown' ]; then
+    info " 已生成本地 hook：$HOOK"
+    hint " 未识别到服务管理器，无法自动挂钩；重启后请手动执行一次 bash argoxv6.sh -s"
+  else
+    info " 已安装开机守护（ArgoX 重装/升级都不会冲掉它）。"
+  fi
+}
+
+remove_hooks() {
+  case "$SYSINIT" in
+    systemd)
+      if [ -f "$DROPIN" ]; then
+        rm -f "$DROPIN"
+        rmdir "$(dirname "$DROPIN")" 2>/dev/null
+        systemctl daemon-reload >/dev/null 2>&1
+        info " 已移除 systemd drop-in。"
+      fi
+      ;;
+    openrc)
+      if [ -f "$OPENRC_UNIT" ]; then
+        rc-update del argoxv6 default >/dev/null 2>&1
+        rm -f "$OPENRC_UNIT"
+        info " 已移除 OpenRC 服务。"
+      fi
+      ;;
+  esac
+  write_conf 'HOOKS' 'no'
+}
+
+ensure_hooks() {
+  hooks_installed && return 0
+  local _ans
+  _ans=$(conf_get HOOKS)
+  [ "$_ans" = 'no' ] && return 1
+  # 之前已经同意过：直接补装（比如 drop-in 被手工删掉）
+  if [ "$_ans" = 'yes' ]; then install_hooks; return 0; fi
+  [ -t 0 ] || return 1
+  echo ''
+  hint " 是否安装开机守护？"
+  plain "   · 装了：服务器重启后 v6 入站自动挂回来（推荐）"
+  plain "   · 不装：只本次生效，重启后需要再跑一次 argoxv6"
+  local _ok
+  reading " 安装开机守护？(y/n)" _ok 'y'
+  [ "$_ok" = 'y' ] || { write_conf 'HOOKS' 'no'; return 1; }
+  install_hooks
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# 端口
+# ---------------------------------------------------------------------------
+argox_ports() {
+  ibjq -r '.inbounds[]?.port // empty' 2>/dev/null
+}
+
+# 该端口能否在 v6 上监听：只有"通配监听 / 具体 IPv6 监听"才会妨碍绑定
+# （纯 IPv4 的 0.0.0.0:x 或 1.2.3.4:x 不影响 [v6addr]:x）
+port_free_on_v6() {
+  local _p="$1" _addrs _a
+  command -v ss >/dev/null 2>&1 || return 0
+  _addrs=$(ss -H -lntu 2>/dev/null | awk '{print $4}' | grep -E "[:.]${_p}\$" 2>/dev/null)
+  while IFS= read -r _a; do
+    [ -z "$_a" ] && continue
+    case "$_a" in
+      \[*\]:*|*::*) return 1 ;;                            # [::]:p、[2001:db8::1]:p、:::p
+      0.0.0.0:*|127.*) continue ;;                          # 纯 IPv4 通配/回环：不冲突
+      [0-9]*.[0-9]*.[0-9]*.[0-9]*:*) continue ;;            # 具体 IPv4 地址：不冲突
+      *) return 1 ;;                                        # *:p 等未知写法：按冲突处理
+    esac
+  done <<< "$_addrs"
+  return 0
+}
+
+is_port_conflict() {
+  local _p="$1" _it _f _l
+  # 1) ArgoX 占用的端口：一律避开（保证 v4 侧不动、也不会互相踩）
+  grep -qx "$_p" <<< "$(argox_ports)" && return 0
+  # 2) 自己已用的 v6 端口
+  while IFS= read -r _it; do
+    [ -z "$_it" ] && continue
+    set -- $_it
+    [ "$3" = "$_p" ] && return 0
+  done <<< "$(list_items)"
+  # 3) 系统里别的 v6 监听
+  port_free_on_v6 "$_p" && return 1
+  return 0
+}
+
+suggest_port() {
   local _p=35000
-  while is_port_conflict "$_p" "$1"; do _p=$((_p + 1)); done
+  while is_port_conflict "$_p"; do _p=$((_p + 1)); done
   echo "$_p"
 }
 
-# ---------------- Reality / 证书 ----------------
+# ---------------------------------------------------------------------------
+# 凭据 / 证书
+# ---------------------------------------------------------------------------
+gen_uuid() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then cat /proc/sys/kernel/random/uuid; return; fi
+  if command -v uuidgen >/dev/null 2>&1; then uuidgen | tr 'A-Z' 'a-z'; return; fi
+  od -An -tx1 -N16 /dev/urandom 2>/dev/null | tr -d ' \n' | sed -E 's/(.{8})(.{4})(.{4})(.{4})(.{12})/\1-\2-\3-\4-\5/'
+}
+
+rand_b64_16() { head -c 16 /dev/urandom | base64 | tr -d '\n'; }
+
 ensure_reality() {
-  if [ -z "${REALITY_PRIVATE:-}" ] || [ -z "${REALITY_PUBLIC:-}" ] || \
-     [ "${REALITY_PRIVATE}" = '__KEY_UNSET__' ]; then
-    local _kp
-    if [ -x "$WORK_DIR/xray" ]; then
-      _kp=$("$WORK_DIR/xray" x25519 2>/dev/null)
-      REALITY_PRIVATE=$(awk '/Private/{print $NF}' <<< "$_kp")
-      REALITY_PUBLIC=$(awk '/Public/{print $NF}' <<< "$_kp")
-    fi
-    [ -z "${REALITY_PRIVATE:-}" ] && error " 无法生成 Reality 密钥对（xray 不可用）。"
-  fi
+  if [ -n "${REALITY_PRIVATE}" ] && [ -n "${REALITY_PUBLIC}" ]; then return 0; fi
+  [ -x "$XRAY" ] || error " 需要 $WORK_DIR/xray 生成 Reality 密钥对。"
+  local _kp
+  _kp=$("$XRAY" x25519 2>/dev/null)
+  REALITY_PRIVATE=$(awk '/[Pp]rivate/{print $NF}' <<< "$_kp")
+  REALITY_PUBLIC=$(awk '/[Pp]ublic/{print $NF}' <<< "$_kp")
+  [ -n "$REALITY_PRIVATE" ] || error " 生成 Reality 密钥对失败。"
 }
 
 ensure_cert() {
-  if [ -n "${CERT_FILE:-}" ] && [ -s "$CERT_FILE" ] && [ -n "${CERT_KEY:-}" ] && [ -s "$CERT_KEY" ]; then
+  if [ -n "${CERT_FILE}" ] && [ -s "$CERT_FILE" ] && [ -n "${CERT_KEY}" ] && [ -s "$CERT_KEY" ]; then
     return 0
   fi
-  command -v openssl >/dev/null 2>&1 || error " 需要 openssl 生成自签证书。"
-  local _dir="$WORK_DIR/cert"
-  mkdir -p "$_dir"
-  openssl ecparam -genkey -name prime256v1 -out "$_dir/private.key" 2>/dev/null
-  cat > "$_dir/cert.conf" << EOF
+  command -v openssl >/dev/null 2>&1 || error " 需要 openssl 生成自签证书（ArgoX 一般已装）。"
+  local _d="$WORK_DIR/cert"
+  mkdir -p "$_d"
+  info " 正在生成自签证书（CN=$TLS_SERVER）..."
+  openssl ecparam -genkey -name prime256v1 -out "$_d/private.key" 2>/dev/null
+  cat > "$_d/cert.conf" << EOF
 [req]
-distinguished_name = req_distinguished_name
-x509_extensions = v3_req
+distinguished_name = dn
+x509_extensions = v3
 prompt = no
-
-[req_distinguished_name]
-CN = $(awk -F . '{print $(NF-1)"."$NF}' <<< "$TLS_SERVER")
-
-[v3_req]
-subjectAltName = @alt_names
-
-[alt_names]
-DNS = ${TLS_SERVER}
+[dn]
+CN = $TLS_SERVER
+[v3]
+subjectAltName = @alt
+[alt]
+DNS = $TLS_SERVER
 EOF
-  openssl req -new -x509 -days 36500 \
-    -key "$_dir/private.key" \
-    -out "$_dir/cert.pem" \
-    -config "$_dir/cert.conf" \
-    -subj "/CN=$TLS_SERVER" \
-    -extensions v3_req 2>/dev/null
-  rm -f "$_dir/cert.conf"
-  CERT_FILE="$_dir/cert.pem"
-  CERT_KEY="$_dir/private.key"
-  info " 已生成自签证书：$CERT_FILE"
+  openssl req -new -x509 -days 36500 -key "$_d/private.key" -out "$_d/cert.pem" \
+    -config "$_d/cert.conf" -subj "/CN=$TLS_SERVER" -extensions v3 2>/dev/null
+  rm -f "$_d/cert.conf"
+  [ -s "$_d/cert.pem" ] || error " 生成证书失败。"
+  CERT_FILE="$_d/cert.pem"
+  CERT_KEY="$_d/private.key"
 }
 
-# ---------------- 入站 JSON 构建 ----------------
-# build_block FAM LETTER PORT UUID PASS -> 输出一个 inbound JSON 块
-build_block() {
-  local _f="$1" _l="$2" _port="$3" _uuid="$4" _pass="$5"
-  local _addr; _addr=$(fam_addr "$_f")
-  local _tag="$NODE_NAME argoxv6-v$_f-$(eval echo \$PROTO_NAME_$_l)"
-  local _path="argoxv6-$_f-$_l"
+# ---------------------------------------------------------------------------
+# 生成 v6 入站（listen 绑本机 IPv6 地址）
+# ---------------------------------------------------------------------------
+build_block() {   # $1=letter $2=port $3=uuid/pass $4=pass(ss)
+  local _l="$1" _port="$2" _cred="$3" _pass="$4" _tag _path
+  _tag=$(item_tag "$_l")
+  _path="argoxv6-$_l"
   case "$_l" in
     b) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$_addr",
+      "listen": "$V6_BIND",
       "port": $_port,
       "protocol": "vless",
       "settings": {
-        "clients": [ { "id": "$_uuid", "flow": "xtls-rprx-vision" } ],
+        "clients": [ { "id": "$_cred", "flow": "xtls-rprx-vision" } ],
         "decryption": "none"
       },
       "streamSettings": {
@@ -329,6 +820,7 @@ build_block() {
         "realitySettings": {
           "show": false,
           "dest": "$TLS_SERVER:443",
+          "xver": 0,
           "serverNames": [ "$TLS_SERVER" ],
           "privateKey": "$REALITY_PRIVATE",
           "publicKey": "$REALITY_PUBLIC",
@@ -342,11 +834,11 @@ JSONEOF
     d) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$_addr",
+      "listen": "$V6_BIND",
       "port": $_port,
       "protocol": "vless",
       "settings": {
-        "clients": [ { "id": "$_uuid", "flow": "" } ],
+        "clients": [ { "id": "$_cred", "flow": "" } ],
         "decryption": "none"
       },
       "streamSettings": {
@@ -370,12 +862,12 @@ JSONEOF
     c) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$_addr",
+      "listen": "$V6_BIND",
       "port": $_port,
       "protocol": "hysteria",
       "settings": {
         "version": 2,
-        "clients": [ { "auth": "$_uuid" } ]
+        "clients": [ { "auth": "$_cred" } ]
       },
       "streamSettings": {
         "network": "hysteria",
@@ -392,11 +884,11 @@ JSONEOF
     k) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$_addr",
+      "listen": "$V6_BIND",
       "port": $_port,
       "protocol": "vless",
       "settings": {
-        "clients": [ { "id": "$_uuid" } ],
+        "clients": [ { "id": "$_cred" } ],
         "decryption": "none"
       },
       "streamSettings": {
@@ -420,11 +912,11 @@ JSONEOF
     l) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$_addr",
+      "listen": "$V6_BIND",
       "port": $_port,
       "protocol": "trojan",
       "settings": {
-        "clients": [ { "password": "$_uuid" } ]
+        "clients": [ { "password": "$_cred" } ]
       },
       "streamSettings": {
         "network": "tcp",
@@ -441,7 +933,7 @@ JSONEOF
     m) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$_addr",
+      "listen": "$V6_BIND",
       "port": $_port,
       "protocol": "shadowsocks",
       "settings": {
@@ -456,21 +948,25 @@ JSONEOF
   esac
 }
 
-# rebuild_json：由 conf 全量重建 argoxv6.json（幂等）
 rebuild_json() {
-  local _blocks='' _first=true _it _f _l _port _uuid _pass
-  while read -r _it; do
+  local _blocks='' _sep='' _it _f _l _port _uuid _pass
+
+  # 没有 IPv6 地址时绝不能生成空 listen 的配置（空 listen = 双栈，会踩 ArgoX 的端口）
+  if [ -z "$V6_BIND" ] && [ -n "$(list_items)" ]; then
+    warning " 未获取到本机 IPv6 地址，已跳过配置生成（现有 v6 节点不动）。"
+    return 1
+  fi
+
+  while IFS= read -r _it; do
     [ -z "$_it" ] && continue
     set -- $_it
     _f="$1" _l="$2" _port="$3"
     _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
     _pass=$(conf_get "$(item_key "$_f" "$_l" PASS)")
-    $_first || _blocks+=$',\n'
-    _blocks+="$(build_block "$_f" "$_l" "$_port" "$_uuid" "$_pass")"
-    _first=false
-  done < <(list_items)
+    _blocks="$_blocks$_sep$(build_block "$_l" "$_port" "$_uuid" "$_pass")"
+    _sep=$',\n'
+  done <<< "$(list_items)"
 
-  [ -s "$V6_JSON" ] && cp -f "$V6_JSON" "$V6_JSON.bak"
   if [ -z "$_blocks" ]; then
     echo '{ "inbounds": [] }' > "$V6_JSON"
   else
@@ -482,338 +978,481 @@ $_blocks
 }
 JSONEOF
   fi
-  "$JQ" empty "$V6_JSON" 2>/dev/null || { [ -s "$V6_JSON.bak" ] && cp -f "$V6_JSON.bak" "$V6_JSON"; error " 生成 $V6_JSON 失败，已回滚。"; }
-}
 
-# ---------------- Xray 服务集成 ----------------
-daemon_file() {
-  if [ -n "${XRAY_DAEMON_FILE:-}" ]; then echo "$XRAY_DAEMON_FILE"
-  elif [ -f /etc/systemd/system/xray.service ]; then echo /etc/systemd/system/xray.service
-  elif [ -f /etc/init.d/xray ]; then echo /etc/init.d/xray
-  else echo ''; fi
-}
-
-patch_daemon() {   # 追加 -c argoxv6.json
-  local _f; _f=$(daemon_file)
-  [ -z "$_f" ] && { hint " 未找到 xray 服务文件，请手动在 xray 启动命令中追加：-c $V6_JSON"; return 1; }
-  grep -q 'argoxv6.json' "$_f" && return 0
-  cp -f "$_f" "$_f.argoxv6.bak"
-  if grep -q '^ExecStart=' "$_f"; then
-    sed -i "s|^ExecStart=\(.*\)|ExecStart=\1 -c $V6_JSON|" "$_f"
-  elif grep -q '^command_args=' "$_f"; then
-    sed -i 's|^command_args="\(.*\)"$|command_args="\1 -c __ARGOXV6_JSON__"|' "$_f"
-    grep -q '__ARGOXV6_JSON__' "$_f" || sed -i "s|^command_args=\(.*\)|command_args=\1 -c __ARGOXV6_JSON__|" "$_f"
-    sed -i "s|__ARGOXV6_JSON__|$V6_JSON|" "$_f"
-  else
-    hint " 无法识别服务文件格式（$_f），请手动追加：-c $V6_JSON"
+  if ! "$JQ" empty "$V6_JSON" >/dev/null 2>&1; then
+    warning " 生成 $V6_JSON 失败（JSON 无效）。诊断：$JQ empty $V6_JSON"
     return 1
   fi
-  info " 已集成到 xray 服务：$_f"
+  return 0
 }
 
-unpatch_daemon() {
-  local _f; _f=$(daemon_file)
-  [ -z "$_f" ] && return 0
-  grep -q 'argoxv6.json' "$_f" || return 0
-  sed -i "s| -c $V6_JSON||g" "$_f"
-  info " 已从 xray 服务移除 argoxv6 配置。"
-}
-
-repair_integration() {
-  patch_daemon && restart_xray
-}
-
-restart_xray() {
-  local _args=(-c "$WORK_DIR/inbound.json" -c "$WORK_DIR/outbound.json")
-  [ -s "$V6_JSON" ] && _args+=(-c "$V6_JSON")
-  # 校验合并配置
-  if [ -x "$WORK_DIR/xray" ]; then
-    if ! "$WORK_DIR/xray" run -test "${_args[@]}" >/dev/null 2>&1; then
-      warning " Xray 配置校验失败，保留原运行状态。诊断命令："
-      hint "   $WORK_DIR/xray run -test ${_args[*]}"
-      return 1
+# ---------------------------------------------------------------------------
+# 同步：钉 v4-only → （必要时）重启 → 热挂 v6
+# ---------------------------------------------------------------------------
+verify_v6() {
+  local _it _f _l _tag _live _ok=0 _bad=0
+  local _lf="$WORK_DIR/.v6live.$$"
+  live_tags_file "$_lf"
+  while IFS= read -r _it; do
+    [ -z "$_it" ] && continue
+    set -- $_it
+    _f="$1" _l="$2"
+    _tag=$(item_tag "$_l")
+    if grep -qxF "$_tag" "$_lf" 2>/dev/null; then
+      _ok=$((_ok + 1))
+    else
+      _bad=$((_bad + 1))
+      warning "   ✗ 未挂载：$(proto_desc "$_l")（端口 $3）"
     fi
-  fi
-  if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files xray.service >/dev/null 2>&1; then
-    systemctl daemon-reload >/dev/null 2>&1
-    systemctl restart xray >/dev/null 2>&1 && { info " xray 服务已重启。"; return 0; }
-  fi
-  if [ -x /etc/init.d/xray ]; then
-    /etc/init.d/xray restart >/dev/null 2>&1 && { info " xray 服务已重启（OpenRC）。"; return 0; }
-  fi
-  hint " 未能自动重启 xray，请手动执行：systemctl restart xray （或 rc-service xray restart）"
+  done <<< "$(list_items)"
+  rm -f "$_lf"
+  [ "$_ok" -gt 0 ] && info "   ✓ 已挂载 v6 协议：$_ok 个"
+  [ "$_bad" = '0' ]
 }
 
-# ---------------- 防火墙 ----------------
+sync_all() {
+  local _ret=0
+  rebuild_json || return 1
+
+  ensure_hooks
+
+  # 1) 钉 v4-only + 校正 v6 地址
+  [ -x "$HOOK" ] || write_hook
+  local _before _after
+  _before=$(md5sum "$IB" 2>/dev/null | awk '{print $1}')
+  rm -f "$FLAG" 2>/dev/null
+  "$HOOK" pre >/dev/null 2>&1
+  _after=$(md5sum "$IB" 2>/dev/null | awk '{print $1}')
+
+  # 2) 需要重启吗
+  local _need_restart='no'
+  xray_active || _need_restart='yes'
+  [ -f "$FLAG" ] && _need_restart='yes'
+  if [ "$_before" != "$_after" ] && [ -n "$_before" ]; then _need_restart='yes'; fi
+
+  if [ "$_need_restart" = 'yes' ]; then
+    if [ "$_before" != "$_after" ] && [ -n "$_before" ]; then
+      info " ArgoX 的入站已加固为 IPv4-only，重启 Xray 生效..."
+    else
+      info " 重启 Xray ..."
+    fi
+    rm -f "$FLAG" 2>/dev/null
+    restart_xray || _ret=1
+  fi
+
+  # 3) 热挂 v6 入站
+  api_ready || { warning " Xray API 未就绪，v6 入站暂时无法挂载。"; return 1; }
+  "$HOOK" post >/dev/null 2>&1
+  sleep 0.3
+  verify_v6 || _ret=1
+  return $_ret
+}
+
+# ---------------------------------------------------------------------------
+# 防火墙（只放行 v6 侧端口）
+# ---------------------------------------------------------------------------
 fw_backend() {
-  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'active'; then echo ufw
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then echo ufw
   elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then echo firewalld
-  elif command -v iptables >/dev/null 2>&1; then echo iptables
+  elif command -v ip6tables >/dev/null 2>&1; then echo ip6tables
   else echo none; fi
 }
 
-fw_protos_for() {   # 协议字母 -> 需放行的传输层协议
+fw_protos() {
   case "$1" in
     c) echo 'udp' ;;
-    m|k) echo 'tcp udp' ;;
+    k|m) echo 'tcp udp' ;;
     *) echo 'tcp' ;;
   esac
 }
 
-fw_allow() {   # $1=fam $2=letter $3=port
-  local _f="$1" _l="$2" _port="$3" _be _p
-  _be=$(fw_backend)
-  for _p in $(fw_protos_for "$_l"); do
-    case "$_be" in
-      ufw)
-        ufw allow "$_port/$_p" comment "ArgoXV6 $_f $_l" >/dev/null 2>&1 ;;
-      firewalld)
-        firewall-cmd --permanent --add-port="$_port/$_p" >/dev/null 2>&1 ;;
-      iptables)
-        local _bin=iptables; [ "$_f" = '6' ] && _bin=ip6tables
-        $_bin -C INPUT -p "$_p" --dport "$_port" -m comment --comment "ArgoXV6 $_f $_l" -j ACCEPT 2>/dev/null \
-          || $_bin -I INPUT -p "$_p" --dport "$_port" -m comment --comment "ArgoXV6 $_f $_l" -j ACCEPT 2>/dev/null ;;
-    esac
-  done
-  [ "$_be" = 'firewalld' ] && firewall-cmd --reload >/dev/null 2>&1
-  [ "$_be" = 'iptables' ] && persist_iptables
-  [ "$_be" = 'none' ] && hint " 未检测到防火墙，请自行放行端口 $_port（$(fam_name "$_f")）。"
-}
-
-fw_deny() {   # $1=fam $2=letter $3=port
-  local _f="$1" _l="$2" _port="$3" _be _p
-  _be=$(fw_backend)
-  for _p in $(fw_protos_for "$_l"); do
-    case "$_be" in
-      ufw)
-        ufw delete allow "$_port/$_p" >/dev/null 2>&1 ;;
-      firewalld)
-        firewall-cmd --permanent --remove-port="$_port/$_p" >/dev/null 2>&1 ;;
-      iptables)
-        local _bin=iptables; [ "$_f" = '6' ] && _bin=ip6tables
-        $_bin -D INPUT -p "$_p" --dport "$_port" -m comment --comment "ArgoXV6 $_f $_l" -j ACCEPT 2>/dev/null ;;
-    esac
-  done
-  [ "$_be" = 'firewalld' ] && firewall-cmd --reload >/dev/null 2>&1
-  [ "$_be" = 'iptables' ] && persist_iptables
-}
-
 persist_iptables() {
-  # ArgoX 已装 iptables 持久化钩子（rules.v4 / rules.v6），直接覆盖保存即可
   if [ -d /etc/iptables ]; then
-    iptables-save  > /etc/iptables/rules.v4  2>/dev/null || true
-    ip6tables-save > /etc/iptables/rules.v6  2>/dev/null || true
+    ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
   elif command -v netfilter-persistent >/dev/null 2>&1; then
     netfilter-persistent save >/dev/null 2>&1 || true
   fi
 }
 
-# ---------------- 节点链接 ----------------
-# build_link FAM LETTER PORT UUID PASS
-build_link() {
-  local _f="$1" _l="$2" _port="$3" _uuid="$4" _pass="$5"
-  local _h; _h=$(host_for_link "$(fam_addr "$_f")")
-  local _n="$NODE_NAME argoxv6-v$_f-$(eval echo \$PROTO_NAME_$_l)"
+fw_allow() {   # $1=letter $2=port
+  local _l="$1" _p="$2" _be _t
+  _be=$(fw_backend)
+  for _t in $(fw_protos "$_l"); do
+    case "$_be" in
+      ufw) ufw allow "$_p/$_t" comment 'argoxv6' >/dev/null 2>&1 ;;
+      firewalld) firewall-cmd --permanent --add-port="$_p/$_t" >/dev/null 2>&1 ;;
+      ip6tables)
+        ip6tables -C INPUT -p "$_t" --dport "$_p" -m comment --comment 'argoxv6' -j ACCEPT 2>/dev/null \
+          || ip6tables -I INPUT -p "$_t" --dport "$_p" -m comment --comment 'argoxv6' -j ACCEPT 2>/dev/null ;;
+    esac
+  done
+  [ "$_be" = 'firewalld' ] && firewall-cmd --reload >/dev/null 2>&1
+  [ "$_be" = 'ip6tables' ] && persist_iptables
+  [ "$_be" = 'none' ] && hint " 未检测到防火墙，请自行放行 IPv6 端口 $_p/$_t"
+  return 0
+}
+
+fw_deny() {    # $1=letter $2=port
+  local _l="$1" _p="$2" _be _t
+  _be=$(fw_backend)
+  for _t in $(fw_protos "$_l"); do
+    case "$_be" in
+      ufw) ufw delete allow "$_p/$_t" >/dev/null 2>&1 ;;
+      firewalld) firewall-cmd --permanent --remove-port="$_p/$_t" >/dev/null 2>&1 ;;
+      ip6tables) ip6tables -D INPUT -p "$_t" --dport "$_p" -m comment --comment 'argoxv6' -j ACCEPT 2>/dev/null ;;
+    esac
+  done
+  [ "$_be" = 'firewalld' ] && firewall-cmd --reload >/dev/null 2>&1
+  [ "$_be" = 'ip6tables' ] && persist_iptables
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# 节点链接
+# ---------------------------------------------------------------------------
+build_link() {   # $1=letter $2=port $3=uuid $4=pass
+  local _l="$1" _port="$2" _cred="$3" _pass="$4" _h _n
+  _h=$(host_for_link "${V6_PUB:-$V6_BIND}")
+  _n=$(item_tag "$_l")
   _n=${_n// /%20}
   case "$_l" in
-    b) echo "vless://${_uuid}@${_h}:${_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${TLS_SERVER}&fp=chrome&pbk=${REALITY_PUBLIC}&type=tcp&headerType=none#${_n}" ;;
-    d) echo "vless://${_uuid}@${_h}:${_port}?encryption=none&security=reality&sni=${TLS_SERVER}&fp=chrome&pbk=${REALITY_PUBLIC}&type=grpc&serviceName=grpc&packetEncoding=xudp#${_n}" ;;
-    c) echo "hysteria2://${_uuid}@${_h}:${_port}?sni=${TLS_SERVER}&insecure=1&alpn=h3#${_n}" ;;
-    k) echo "vless://${_uuid}@${_h}:${_port}?encryption=none&security=tls&sni=${TLS_SERVER}&allowInsecure=1&fp=chrome&alpn=h3&type=xhttp&path=%2Fargoxv6-${_f}-${_l}&mode=stream-up#${_n}" ;;
-    l) echo "trojan://${_uuid}@${_h}:${_port}?security=tls&sni=${TLS_SERVER}&allowInsecure=1&fp=chrome#${_n}" ;;
+    b) echo "vless://${_cred}@${_h}:${_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${TLS_SERVER}&fp=${FINGER_PRINT}&pbk=${REALITY_PUBLIC}&type=tcp&headerType=none#${_n}" ;;
+    d) echo "vless://${_cred}@${_h}:${_port}?encryption=none&security=reality&sni=${TLS_SERVER}&fp=${FINGER_PRINT}&pbk=${REALITY_PUBLIC}&type=grpc&serviceName=grpc&mode=multi#${_n}" ;;
+    c) echo "hysteria2://${_cred}@${_h}:${_port}/?sni=${TLS_SERVER}&insecure=1&alpn=h3#${_n}" ;;
+    k) echo "vless://${_cred}@${_h}:${_port}?encryption=none&security=tls&sni=${TLS_SERVER}&allowInsecure=1&fp=${FINGER_PRINT}&alpn=h3&type=xhttp&path=%2Fargoxv6-${_l}&mode=stream-up#${_n}" ;;
+    l) echo "trojan://${_cred}@${_h}:${_port}?security=tls&sni=${TLS_SERVER}&allowInsecure=1&fp=${FINGER_PRINT}#${_n}" ;;
     m) local _b64
-       _b64=$(printf '2022-blake3-aes-128-gcm:%s' "$_pass" | base64 -w0 2>/dev/null || printf '2022-blake3-aes-128-gcm:%s' "$_pass" | base64)
+       _b64=$(printf '2022-blake3-aes-128-gcm:%s' "$_pass" | base64 | tr -d '\n')
        echo "ss://${_b64}@${_h}:${_port}#${_n}" ;;
   esac
 }
 
 show_links() {
-  local _it _f _l _port _uuid _pass _link _any=false _fam_lines
-  for _f in 6 4; do
-    _fam_lines=''
-    while read -r _it; do
-      [ -z "$_it" ] && continue
-      set -- $_it
-      [ "$1" = "$_f" ] || continue
-      _l="$2" _port="$3"
-      _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
-      _pass=$(conf_get "$(item_key "$_f" "$_l" PASS)")
-      _link=$(build_link "$_f" "$_l" "$_port" "$_uuid" "$_pass")
-      _fam_lines+="$(eval echo \$PROTO_DESC_$_l) [端口 $_port]\n$_link\n\n"
-      _any=true
-    done < <(list_items)
-    if [ -n "$_fam_lines" ]; then
+  local _it _f _l _port _uuid _pass _any='no'
+  [ -n "$V6_BIND" ] || { warning " 未检测到 IPv6 地址，链接中的主机名会缺失；请先执行菜单 6。"; }
+  while IFS= read -r _it; do
+    [ -z "$_it" ] && continue
+    set -- $_it
+    _f="$1" _l="$2" _port="$3"
+    _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
+    _pass=$(conf_get "$(item_key "$_f" "$_l" PASS)")
+    if [ "$_any" = 'no' ]; then
       echo ''
-      info "================ $(fam_name "$_f") 设备专用节点（监听 $(fam_addr "$_f")） ================"
-      echo -e "$_fam_lines"
+      info "============ IPv6 专用节点（监听 $V6_BIND）============"
     fi
-  done
-  $_any || hint " 尚未配置任何 argoxv6 节点，请先在菜单中添加。"
+    _any='yes'
+    plain "$(proto_desc "$_l")  ·  端口 $_port"
+    plain "$(build_link "$_l" "$_port" "$_uuid" "$_pass")"
+    echo ''
+  done <<< "$(list_items)"
+  [ "$_any" = 'no' ] && hint " 还没有配置任何 IPv6 节点（菜单 2 添加）。"
+  return 0
 }
 
-# ---------------- 交互流程 ----------------
-# add_one_protocol FAM LETTER：配置单个协议（写 conf、放行防火墙、生成链接）
-# 不做 rebuild / patch / restart，由 add_protocol 批量完成后统一执行一次
-add_one_protocol() {   # $1=fam $2=letter
-  local _f="$1" _l="$2" _addr _old_port _port _sug _uuid _pass=''
-  _addr=$(fam_addr "$_f")
-
-  # 同栈已有该协议 -> 提示覆盖
-  _old_port=$(conf_get "$(item_key "$_f" "$_l" PORT)")
-  if [ -n "$_old_port" ]; then
-    hint " $(fam_name "$_f") 侧已存在 $(eval echo \$PROTO_DESC_$_l)（端口 $_old_port），将覆盖。"
+# ---------------------------------------------------------------------------
+# 动作：添加 / 删除 / 刷新 / 状态 / 调用 ArgoX / 卸载
+# ---------------------------------------------------------------------------
+add_one() {   # $1=letter
+  local _l="$1" _old _port _uuid _pass=''
+  _old=$(conf_get "$(item_key 6 "$_l" PORT)")
+  if [ -n "$_old" ]; then
+    hint " 已存在 $(proto_desc "$_l")（端口 $_old），将覆盖。"
   fi
 
-  _sug=$(suggest_port "$_f")
-  [ -n "$_old_port" ] && _sug="$_old_port"
-  reading " 请输入 $(eval echo \$PROTO_DESC_$_l) 的端口（直接回车使用推荐值）" _port "$_sug"
-  [[ "$_port" =~ ^[0-9]+$ ]] && [ "$_port" -ge 100 ] && [ "$_port" -le 65535 ] || error " 端口无效：$_port"
-  if is_port_conflict "$_port" "$_f" && [ "$_port" != "$_old_port" ]; then
-    error " 端口 $_port 已被占用（ArgoX 或本机其他服务）。"
+  local _sug
+  _sug=$(suggest_port)
+  [ -n "$_old" ] && _sug="$_old"
+  reading " $(proto_desc "$_l") 端口（回车用推荐值）" _port "$_sug"
+  if ! [[ "$_port" =~ ^[0-9]+$ ]]; then warning " 端口无效：$_port"; return 1; fi
+  if [ "$_port" -lt 1 ] || [ "$_port" -gt 65535 ]; then warning " 端口超出范围：$_port"; return 1; fi
+  if [ "$_port" != "$_old" ] && is_port_conflict "$_port"; then
+    warning " 端口 $_port 已被占用（ArgoX 或本机其他服务），已跳过 $(proto_desc "$_l")。"
+    return 1
   fi
 
-  _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
+  _uuid=$(conf_get "$(item_key 6 "$_l" UUID)")
   [ -z "$_uuid" ] && _uuid=$(gen_uuid)
   if [ "$_l" = 'm' ]; then
-    _pass=$(conf_get "$(item_key "$_f" "$_l" PASS)")
-    [ -z "$_pass" ] && _pass=$(openssl rand -base64 16)
+    _pass=$(conf_get "$(item_key 6 "$_l" PASS)")
+    [ -z "$_pass" ] && _pass=$(rand_b64_16)
   fi
 
-  # 依赖准备
   case "$_l" in
     b|d) ensure_reality ;;
     c|k|l) ensure_cert ;;
   esac
 
-  # 写 conf（立即落盘，让同批后续协议的端口推荐避开它）
-  write_conf "$(item_key "$_f" "$_l" PORT)" "$_port"
-  write_conf "$(item_key "$_f" "$_l" UUID)" "$_uuid"
-  [ "$_l" = 'm' ] && write_conf "$(item_key "$_f" "$_l" PASS)" "$_pass"
+  write_conf "$(item_key 6 "$_l" PORT)" "$_port"
+  write_conf "$(item_key 6 "$_l" UUID)" "$_uuid"
+  [ "$_l" = 'm' ] && write_conf "$(item_key 6 "$_l" PASS)" "$_pass"
   write_conf 'NODE_NAME' "$NODE_NAME"
-  fw_allow "$_f" "$_l" "$_port"
 
+  fw_allow "$_l" "$_port"
   echo ''
-  info " 已添加：$(fam_name "$_f") 侧 $(eval echo \$PROTO_DESC_$_l)（绑定 $_addr:$_port）"
-  ADD_LINK=$(build_link "$_f" "$_l" "$_port" "$_uuid" "$_pass")
-  echo ''
-  echo " $ADD_LINK"
+  info " ✓ 已加入：$(proto_desc "$_l")  →  [${V6_BIND}]:${_port}"
+  return 0
 }
 
-add_protocol() {   # $1=fam
-  local _f="$1" _addr
-  _addr=$(fam_addr "$_f")
-  [ -z "$_addr" ] && error " 未检测到本机 $(fam_name "$_f") 公网地址，无法为 $(fam_name "$_f") 设备单独设置协议。"
-
+add_protocol() {
+  [ -n "$V6_BIND" ] || error " 本机没有可用的公网 IPv6 地址，v6 侧无法配置。"
   echo ''
-  info "=========== 为 $(fam_name "$_f") 设备添加代理协议（绑定监听：$_addr） ==========="
+  info "=========== 为 IPv6 设备添加代理协议（绑定 $V6_BIND）==========="
   local _l
-  for _l in $PROTO_LETTERS; do
-    hint " $_l. $(eval echo \$PROTO_DESC_$_l)"
-  done
-  hint " 支持一次输入多个字母批量添加（如 bcdlm），a 或回车 = 全部添加"
+  for _l in $PROTO_LETTERS; do hint " $_l. $(proto_desc "$_l")"; done
+  hint " 可一次输入多个字母（如 bcdlm），a 或回车 = 全部"
 
-  # 按 ArgoX 的解析习惯：多字母批量、逐字符过滤合法字母、去重保序、a/空 = 全部
-  local _sel _letters
-  while true; do
-    reading " 请选择协议字母" _sel
+  local _sel _letters _cnt=0
+  while :; do
+    reading " 选择协议" _sel
     _letters=$(parse_letters "$_sel")
     [ -n "$_letters" ] && break
-    hint " 未识别到有效协议字母（可用：$PROTO_LETTERS），请重新输入。"
+    hint " 未识别，请重输（可选：$PROTO_LETTERS）"
   done
 
-  local _cnt=0
   for _l in $_letters; do
-    ADD_LINK=''
-    add_one_protocol "$_f" "$_l"
+    add_one "$_l" || continue
     _cnt=$((_cnt + 1))
   done
 
-  # 批量完成后统一重建配置、集成服务并重启一次
-  rebuild_json
-  patch_daemon
-  restart_xray
-  info " 共添加/更新 $_cnt 个协议，Xray 已重载。"
+  info " 正在应用（ArgoX 的 v4 侧不受影响）..."
+  sync_all
+  echo ''
+  show_links
 }
 
 delete_protocol() {
-  local _it _any=false
+  local _it _any='no'
   echo ''
-  info "=========== 已配置的 argoxv6 协议 ==========="
-  while read -r _it; do
+  info "=========== 已配置的 IPv6 协议 ==========="
+  while IFS= read -r _it; do
     [ -z "$_it" ] && continue
     set -- $_it
-    hint " $(fam_name "$1") 侧 | $2 = $(eval echo \$PROTO_DESC_$2) | 端口 $3"
-    _any=true
-  done < <(list_items)
-  $_any || { hint " 尚未配置任何协议。"; return 0; }
+    hint " $_2 = $(proto_desc "$2")   端口 $3"
+    _any='yes'
+  done <<< "$(list_items)"
+  [ "$_any" = 'no' ] && { hint " 尚未配置。"; return 0; }
 
-  local _f _l
-  reading " 请输入要删除的栈（4 或 6）" _f
-  reading " 请输入要删除的协议字母" _l
-  local _port
-  _port=$(conf_get "$(item_key "$_f" "$_l" PORT)")
-  [ -z "$_port" ] && error " 未找到：$(fam_name "$_f") 侧协议 $_l"
+  local _l _port
+  reading " 要删除的协议字母" _l
+  _l=$(parse_letters "$_l")
+  [ -n "$_l" ] || error " 无效字母。"
+  _l=${_l%% *}
 
-  del_conf_prefix "ITEM_${_f}_${_l}_"
+  _port=$(conf_get "$(item_key 6 "$_l" PORT)")
+  [ -n "$_port" ] || error " 未找到该协议。"
+
+  # 先把它从运行中的 xray 摘掉
+  local _a _tag _lf="$WORK_DIR/.v6live.$$"
+  _a=$(api_addr) || true
+  if [ -n "$_a" ] && [ -x "$XRAY" ]; then
+    _tag=$(item_tag "$_l")
+    "$XRAY" api rmi --server="$_a" "$_tag" >/dev/null 2>&1
+  fi
+
+  del_conf_prefix "ITEM_6_${_l}_"
+  fw_deny "$_l" "$_port"
   rebuild_json
-  fw_deny "$_f" "$_l" "$_port"
-  restart_xray
-  info " 已删除 $(fam_name "$_f") 侧 $(eval echo \$PROTO_DESC_$_l)（端口 $_port）。"
+
+  # 重挂剩下的
+  if [ -x "$HOOK" ]; then "$HOOK" post >/dev/null 2>&1; fi
+  info " 已删除 $(proto_desc "$_l")（端口 $_port）。"
 }
 
-update_addr() {
+refresh_addr() {
   echo ''
-  hint " 正在重新探测公网 IP ..."
-  detect_wan
-  info " IPv4: ${WAN4:-未检测到}    IPv6: ${WAN6:-未检测到}"
-  rebuild_json
-  restart_xray
-  info " 已按新地址重建入站监听。"
+  info " 正在重新探测 IPv6 地址 ..."
+  if detect_v6; then
+    info " IPv6 地址已更新为：$V6_BIND"
+    rebuild_json
+    sync_all
+  else
+    info " IPv6 地址未变化：${V6_BIND:-未检测到}"
+  fi
 }
 
-uninstall_v6() {
+status() {
   echo ''
-  warning " 即将卸载 argoxv6：删除全部分栈入站、还原 xray 服务、关闭相关防火墙端口。"
+  info "=============== argoxv6 状态 ==============="
+  if argox_installed; then
+    plain " ArgoX        : 已安装  ($WORK_DIR)"
+  else
+    plain " ArgoX        : 未安装"
+  fi
+  plain " 服务管理器   : $SYSINIT"
+  plain " Xray 进程    : $(xray_active && echo 'running' || echo 'stopped')"
+  if [ "$(v4_state)" = 'v4only' ]; then
+    plain " IPv4 侧      : 已钉死 0.0.0.0（ArgoX 只听 IPv4）"
+  else
+    warning " IPv4 侧      : 双栈中（ArgoX 也能被 IPv6 访问）→ 菜单 5 修复"
+  fi
+  plain " IPv6 绑定    : ${V6_BIND:-未检测到}"
+  plain " IPv6 公网    : ${V6_PUB:-同绑定地址}"
+  plain " 开机守护     : $(hooks_installed && echo '已安装' || echo '未安装')"
+  plain " 监听 API     : $(api_addr 2>/dev/null || echo '未找到')"
+  echo ''
+  plain " ArgoX 入站："
+  v4_summary
+  echo ''
+  if [ -n "$(list_items)" ]; then
+    plain " argoxv6 入站："
+    local _it _lf="$WORK_DIR/.st.$$"
+    live_tags_file "$_lf"
+    while IFS= read -r _it; do
+      [ -z "$_it" ] && continue
+      set -- $_it
+      if grep -qxF "$(item_tag "$2")" "$_lf" 2>/dev/null; then
+        plain "   $3 | $V6_BIND | $(proto_desc "$2")  ✓ 运行中"
+      else
+        plain "   $3 | $V6_BIND | $(proto_desc "$2")  ✗ 未挂载"
+      fi
+    done <<< "$(list_items)"
+    rm -f "$_lf"
+  fi
+  echo ''
+}
+
+# 调用 ArgoX 主脚本（v4 侧的唯一入口）
+run_argox_script() {
+  mkdir -p "$STATE_DIR"
+  local _src=''
+  info " 正在获取 ArgoX 主脚本 ..." >&2
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --max-time 30 "$ARGOX_URL" -o "$ARGOX_CACHE.new" 2>/dev/null && _src="$ARGOX_CACHE.new"
+  fi
+  if [ -z "$_src" ] && command -v wget >/dev/null 2>&1; then
+    wget -qO "$ARGOX_CACHE.new" --timeout=30 --tries=2 "$ARGOX_URL" 2>/dev/null && _src="$ARGOX_CACHE.new"
+  fi
+  if [ -n "$_src" ] && [ -s "$_src" ]; then
+    head -n 1 "$_src" | grep -q '#!' && mv -f "$_src" "$ARGOX_CACHE"
+  fi
+  rm -f "$ARGOX_CACHE.new"
+  if [ -s "$ARGOX_CACHE" ]; then
+    bash "$ARGOX_CACHE"
+    return $?
+  fi
+  warning " 下载失败，尝试在线执行 ..." >&2
+  if command -v curl >/dev/null 2>&1; then
+    bash <(curl -fsSL "$ARGOX_URL")
+  else
+    bash <(wget -qO- "$ARGOX_URL")
+  fi
+}
+
+manage_v4() {
+  echo ''
+  info "=========== 进入 ArgoX 管理 IPv4 节点 ==========="
+  plain " · 这里添加/修改的节点都是 IPv4 侧（直连入站会被钉成 0.0.0.0）"
+  plain " · 隧道类节点（WS/XHTTP）由 Cloudflare 边缘接入，v4/v6 设备都能用"
+  plain " · 退出 ArgoX 后会自动同步，把 v6 入站挂回来"
+  echo ''
+  run_argox_script
+  echo ''
+  info "=========== 回到 argoxv6，开始同步 ==========="
+  detect_v6 >/dev/null 2>&1 || true
+  if ! argox_installed; then
+    warning " ArgoX 尚未安装完成，跳过同步。"
+    return 1
+  fi
+  sync_all
+  echo ''
+  show_links
+}
+
+uninstall_all() {
+  echo ''
+  warning " 即将卸载 argoxv6（只删它自己加的东西）："
+  plain "   · 摘掉所有 IPv6 入站"
+  plain "   · 移除开机守护（systemd drop-in / OpenRC 服务）"
+  plain "   · 关闭它为 v6 放行的防火墙端口"
+  plain "   · 可选：把 ArgoX 还原为原生双栈监听"
+  echo ''
+  local _ok
   reading " 确认卸载？(y/n)" _ok 'n'
-  [ "$_ok" != 'y' ] && { hint " 已取消。"; return 0; }
+  [ "$_ok" = 'y' ] || { hint " 已取消。"; return 0; }
 
-  local _it
-  while read -r _it; do
+  # 1) 摘 v6 入站
+  local _a _it _f _l
+  _a=$(api_addr) || true
+  if [ -n "$_a" ] && [ -x "$XRAY" ]; then
+    while IFS= read -r _it; do
+      [ -z "$_it" ] && continue
+      set -- $_it
+      "$XRAY" api rmi --server="$_a" "$(item_tag "$2")" >/dev/null 2>&1
+    done <<< "$(list_items)"
+    # 顺手清理历史残留
+    local _lf="$WORK_DIR/.un.$$"
+    live_tags_file "$_lf"
+    while IFS= read -r _f; do
+      case "$_f" in *argoxv6*) "$XRAY" api rmi --server="$_a" "$_f" >/dev/null 2>&1 ;; esac
+    done < "$_lf"
+    rm -f "$_lf"
+    info " 已摘除 IPv6 入站。"
+  fi
+
+  # 2) 防火墙
+  while IFS= read -r _it; do
     [ -z "$_it" ] && continue
     set -- $_it
-    fw_deny "$1" "$2" "$3"
-  done < <(list_items)
+    fw_deny "$2" "$3"
+  done <<< "$(list_items)"
 
-  del_conf_prefix 'ITEM_'
-  unpatch_daemon
-  rm -f "$V6_JSON" "$V6_JSON.bak" "$V6_CONF"
-  restart_xray
-  info " argoxv6 已卸载。ArgoX 原有节点不受影响。"
+  # 3) 开机守护
+  remove_hooks
+
+  # 4) 是否还原 ArgoX 双栈
+  local _keep='n'
+  if [ "$(v4_state)" = 'v4only' ]; then
+    reading " 是否把 ArgoX 还原为原生双栈监听？(y/n)" _keep 'n'
+    if [ "$_keep" = 'y' ]; then
+      v4_unpatch && info " 已还原 ArgoX 双栈监听（restart xray 生效）。"
+      restart_xray
+    else
+      info " 保留 IPv4-only 监听（ArgoX 只听 IPv4）。"
+    fi
+  fi
+
+  # 5) 删文件
+  rm -f "$V6_JSON" "$V6_JSON.hash" "$V6_CONF" "$HOOK" "$WORK_DIR/.inbound.v4tmp" "$FLAG"
+  rm -f "$WORK_DIR"/.v6live.* "$WORK_DIR"/.inbound.hook.* "$WORK_DIR"/.hooktags.* "$WORK_DIR"/.hooklive.* "$WORK_DIR"/.hookadi.* 2>/dev/null
+  rm -rf "$STATE_DIR"
+  info " argoxv6 已卸载，ArgoX 仍可正常使用。"
 }
 
+# ---------------------------------------------------------------------------
+# 菜单
+# ---------------------------------------------------------------------------
 menu() {
-  while true; do
+  while :; do
     echo ''
-    info "================== argoxv6 分栈代理协议管理 =================="
-    hint " 本机 IPv4: ${WAN4:-无}    本机 IPv6: ${WAN6:-无}"
-    hint " 1. 为 IPv6 设备添加/更换代理协议"
-    hint " 2. 为 IPv4 设备添加/更换代理协议"
-    hint " 3. 查看节点链接（分栈输出）"
-    hint " 4. 删除某个协议"
-    hint " 5. 重新检测公网 IP 并更新监听地址"
-    hint " 6. 修复 Xray 服务集成（ArgoX 升级/重装后执行）"
-    hint " 7. 卸载 argoxv6"
+    info "================= argoxv6 · 双栈分工 ================="
+    if [ "$(v4_state)" = 'v4only' ]; then
+      hint " ArgoX(v4) : 已钉死 IPv4-only ✓"
+    else
+      warning " ArgoX(v4) : 双栈中（建议执行 5 修复）"
+    fi
+    hint " IPv6 绑定 : ${V6_BIND:-未检测到}"
+    hint " Xray      : $(xray_active && echo running || echo stopped)    开机守护: $(hooks_installed && echo 已装 || echo 未装)"
+    echo " -----------------------------------------------------"
+    hint " 1. 管理 IPv4 节点（调用 ArgoX 主脚本）"
+    hint " 2. 为 IPv6 添加 / 更换协议"
+    hint " 3. 查看 IPv6 节点链接"
+    hint " 4. 删除某个 IPv6 协议"
+    hint " 5. 一键同步 / 自检修复"
+    hint " 6. 重新探测 IPv6 地址"
+    hint " 7. 查看当前状态"
+    hint " 8. 卸载 argoxv6"
     hint " 0. 退出"
     local _c
     reading " 请选择" _c
     case "$_c" in
-      1) add_protocol 6 ;;
-      2) add_protocol 4 ;;
+      1) manage_v4 ;;
+      2) add_protocol ;;
       3) show_links ;;
       4) delete_protocol ;;
-      5) update_addr ;;
-      6) repair_integration ;;
-      7) uninstall_v6 ;;
+      5) sync_all ;;
+      6) refresh_addr ;;
+      7) status ;;
+      8) uninstall_all; return 0 ;;
       0) exit 0 ;;
       *) hint " 无效选项。" ;;
     esac
@@ -821,18 +1460,48 @@ menu() {
 }
 
 main() {
-  load_argox
+  local _manual_v6=''
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -6) _manual_v6="${2:-}"; shift 2 ;;
+      -l|-s|-u|-v|-h|--help) break ;;
+      *) shift ;;
+    esac
+  done
+
   case "${1:-}" in
-    -r) repair_integration ;;
+    -v) echo 'argoxv6 v2.0.0'; exit 0 ;;
+  esac
+
+  load_argox
+  if [ -n "$_manual_v6" ]; then
+    is_v6 "$_manual_v6" || error " 不是合法 IPv6 地址：$_manual_v6"
+    V6_OVERRIDE="$_manual_v6"
+  fi
+
+  detect_v6 >/dev/null 2>&1 || true
+  if [ -n "${V6_OVERRIDE:-}" ]; then
+    V6_BIND="$V6_OVERRIDE"
+    V6_PUB="$V6_OVERRIDE"
+    write_conf 'V6_BIND' "$V6_BIND"
+    write_conf 'V6_PUB' "$V6_PUB"
+  fi
+  [ -n "$V6_BIND" ] || warning " 未检测到公网 IPv6，v6 侧将不可用。"
+
+  case "${1:-}" in
     -l) show_links ;;
-    -u) uninstall_v6 ;;
-    *)  detect_wan
-        if [ -n "$WAN4" ] && [ -n "$WAN6" ]; then
-          info " 检测到双栈公网地址：IPv4=$WAN4 / IPv6=$WAN6"
-        else
-          hint " 提示：仅检测到 IPv4=${WAN4:-无} / IPv6=${WAN6:-无}，只能为存在的栈设置独立协议。"
-        fi
-        menu ;;
+    -s) sync_all ;;
+    -u) uninstall_all ;;
+    -h|--help)
+      sed -n '2,60p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
+      ;;
+    *)
+      if [ -n "$(list_items)" ] && [ "$(v4_state)" = 'dual' ]; then
+        hint " 提示：ArgoX 当前为双栈监听，v6 设备也能连到 v4 节点。"
+        hint "       菜单 5 可一键加固为 IPv4-only。"
+      fi
+      menu
+      ;;
   esac
 }
 
