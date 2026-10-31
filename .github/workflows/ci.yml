@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint argoxv6.sh
+        run: shellcheck -x argoxv6.sh
+      - name: Lint test_argoxv6.sh
+        run: shellcheck -x test_argoxv6.sh
+
+  test:
+    name: Mock integration test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq openssl curl
+      - name: Run mock integration test
+        run: bash test_argoxv6.sh
+      - name: Upload generated configs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: argoxv6-mock-output
+          path: /tmp/argoxtest/
+          if-no-files-found: ignore
