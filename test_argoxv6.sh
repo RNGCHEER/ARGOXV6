@@ -97,10 +97,45 @@ MOCKEOF
 cat > "$T/bin/wget" <<'MOCKEOF'
 #!/usr/bin/env bash
 case " $* " in
-  *" -6 "*) echo '{"ip":"2001:db8::1","country":"US","isp":"Mock"}' ;;
-  *)       echo '{"ip":"192.0.2.10","country":"US","isp":"Mock"}' ;;
+  *argox.sh*) cat /tmp/argoxtest/fake_argox_install.sh ;;
+  *" -6 "*)   echo '{"ip":"2001:db8::1","country":"US","isp":"Mock"}' ;;
+  *)          echo '{"ip":"192.0.2.10","country":"US","isp":"Mock"}' ;;
 esac
 MOCKEOF
+# 假 ArgoX 官方安装脚本：往 ARGOX_DIR 里放一套最小可用的 ArgoX 文件
+cat > "$T/fake_argox_install.sh" <<'INSTEOF'
+#!/usr/bin/env bash
+D="${ARGOX_DIR:-/etc/argox}"
+mkdir -p "$D"
+cat > "$D/inbound.json" <<'JSONEOF'
+{
+  "inbounds": [
+    {
+      "tag": "reality-vision",
+      "port": 30001,
+      "protocol": "vless",
+      "settings": {
+        "clients": [ { "id": "MOCK-UUID" } ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "127.0.0.1:20001",
+          "serverNames": [ "addons.mozilla.org" ],
+          "privateKey": "MOCK_PRIVATE_KEY",
+          "publicKey": "MOCK_PUBLIC_KEY",
+          "shortIds": [ "" ]
+        }
+      }
+    }
+  ]
+}
+JSONEOF
+echo '{ "outbounds": [ { "protocol": "freedom", "tag": "direct" } ] }' > "$D/outbound.json"
+echo "fake ArgoX installed to $D"
+INSTEOF
 cat > "$T/bin/curl" <<'MOCKEOF'
 #!/usr/bin/env bash
 case " $* " in
@@ -129,11 +164,34 @@ echo '--- 证书 ---'
 ls -la "$A/cert" 2>/dev/null || echo '(未生成)'
 
 echo ''
-echo '=================== SESSION 2: 删 v6-b，卸载 ==================='
+echo '=================== SESSION 2: 多字母批量添加 v4-d/v4-m ==================='
+printf '2\ndm\n\n\n3\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
+
+echo ''
+echo '=================== SESSION 2 后: v4 入站清单 ==================='
+jq '[.inbounds[] | select(.listen != "127.0.0.1") | {tag, listen, port, protocol}]' "$A/argoxv6.json"
+
+echo ''
+echo '=================== SESSION 3: 字母 a = 全部添加（v6） ==================='
+printf '1\na\n\n\n\n\n\n\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1 | grep -E '已添加|绑定|共添加'
+
+echo ''
+echo '=================== SESSION 4a: 无 ArgoX -> 拒绝安装 ==================='
+rm -rf "$T/noargox"
+printf 'n\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$T/noargox" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
+
+echo ''
+echo '=================== SESSION 4b: 无 ArgoX -> 一键安装后进菜单 ==================='
+printf 'y\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$T/noargox" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
+echo '--- 一键安装生成的文件 ---'
+ls "$T/noargox"
+
+echo ''
+echo '=================== SESSION 5: 删 v6-b，卸载 ==================='
 printf '4\n6\nb\n7\ny\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
 
 echo ''
-echo '=================== SESSION 2 后的状态 ==================='
+echo '=================== SESSION 5 后的状态 ==================='
 echo '--- argoxv6.json ---'
 cat "$A/argoxv6.json" 2>/dev/null || echo '(已删除)'
 echo '--- argoxv6.conf ---'

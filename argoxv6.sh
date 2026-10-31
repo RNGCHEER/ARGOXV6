@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 # argoxv6.sh — ArgoX 辅助脚本：IPv4 / IPv6 分栈代理协议管理
-# 版本：v1.0.0 (2026.10.31)
+# 版本：v1.0.1 (2026.10.31)
 # 项目主页：https://github.com/RNGCHEER/ARGOXV6
 # 许可证：GPL-3.0（与上游 ArgoX 相同）
 #
@@ -66,11 +66,31 @@ hint()    { echo -e "\033[33m\033[01m$*\033[0m"; }
 reading() {
   local _p="$1" _v="$2" _d="${3:-}"
   if [ -n "$_d" ]; then
-    read -r -p "$(echo -e "$_p [$_d]: ")" "$_v"
+    read -r -p "$(echo -e "$_p [$_d]: ")" "$_v" || true
     [ -z "${!_v}" ] && eval "$_v='$_d'"
   else
-    read -r -p "$(echo -e "$_p ")" "$_v"
+    read -r -p "$(echo -e "$_p ")" "$_v" || exit 0
   fi
+}
+
+# 按 ArgoX 的习惯解析协议选择：支持多字母批量（如 bcdlm）、a 或回车 = 全部
+# 逐字符过滤合法字母、去重、保持输入顺序（与 argox.sh xray_variable 的解析一致）
+parse_letters() {
+  local _in="${1,,}" _ch _out=''
+  if [ -z "$_in" ] || [ "$_in" = 'a' ]; then
+    echo "$PROTO_LETTERS"
+    return 0
+  fi
+  while IFS= read -r _ch; do
+    case " $PROTO_LETTERS " in
+      *" $_ch "*)
+        case " $_out " in
+          *" $_ch "*) : ;;
+          *) _out+="$_ch " ;;
+        esac ;;
+    esac
+  done < <(grep -o . <<< "$_in")
+  echo "${_out% }"
 }
 
 # ---------------- 通用工具 ----------------
@@ -125,9 +145,29 @@ list_items() {
 item_key() { echo "ITEM_$1_$2_$3"; }   # FAM LETTER FIELD
 
 # ---------------- ArgoX 环境探测 ----------------
-load_argox() {
+# 未检测到 ArgoX 时可选一键安装（调用 ArgoX 官方脚本，交互式）
+ensure_argox() {
+  [ -s "$WORK_DIR/inbound.json" ] && [ -s "$WORK_DIR/outbound.json" ] && return 0
+  echo ''
+  warning " 未检测到 ArgoX 安装（$WORK_DIR/inbound.json 不存在）。"
+  hint " argoxv6 需要在 ArgoX 之上工作。可现在一键安装 ArgoX（官方脚本，交互式），或选 n 自行安装。"
+  local _ok
+  reading " 是否现在安装 ArgoX？(y/n)" _ok 'n'
+  [ "$_ok" = 'y' ] || error " 已取消。请先安装 ArgoX 后重新运行 argoxv6：bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/ArgoX/main/argox.sh)"
+  echo ''
+  info " 正在启动 ArgoX 官方安装脚本 ..."
+  if command -v wget >/dev/null 2>&1; then
+    bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/ArgoX/main/argox.sh)
+  else
+    bash <(curl -fsSL https://raw.githubusercontent.com/fscarmen/ArgoX/main/argox.sh)
+  fi
   [ -s "$WORK_DIR/inbound.json" ] && [ -s "$WORK_DIR/outbound.json" ] || \
-    error " 未检测到 ArgoX 安装（$WORK_DIR/inbound.json 不存在）。\n 请先安装 ArgoX：bash <(wget -qO- https://raw.githubusercontent.com/fscarmen/ArgoX/main/argox.sh)"
+    error " ArgoX 安装未完成或被取消，argoxv6 无法继续。"
+  info " ArgoX 已就绪，继续 argoxv6 流程。"
+}
+
+load_argox() {
+  ensure_argox
   [ -x "$WORK_DIR/xray" ] || hint " 提示：未找到 $WORK_DIR/xray，密钥生成与配置校验可能受限。"
   JQ=$(jq_bin)
 
@@ -204,9 +244,9 @@ is_port_conflict() {   # $1=port $2=fam
   local _it
   while read -r _it; do
     [ -z "$_it" ] && continue
-    set -- $_it
-    [ "$2" = "$_p" ] && [ "$1" = "$_f" ] && return 0
-  done < <(list_items)
+    set -- $_it   # $1=fam $2=letter $3=port
+    [ "$3" = "$_p" ] && [ "$1" = "$_f" ] && return 0
+    done < <(list_items)
   return 1
 }
 
@@ -612,40 +652,26 @@ show_links() {
 }
 
 # ---------------- 交互流程 ----------------
-add_protocol() {   # $1=fam
-  local _f="$1" _addr
+# add_one_protocol FAM LETTER：配置单个协议（写 conf、放行防火墙、生成链接）
+# 不做 rebuild / patch / restart，由 add_protocol 批量完成后统一执行一次
+add_one_protocol() {   # $1=fam $2=letter
+  local _f="$1" _l="$2" _addr _old_port _port _sug _uuid _pass=''
   _addr=$(fam_addr "$_f")
-  [ -z "$_addr" ] && error " 未检测到本机 $(fam_name "$_f") 公网地址，无法为 $(fam_name "$_f") 设备单独设置协议。"
 
-  echo ''
-  info "=========== 为 $(fam_name "$_f") 设备添加代理协议（绑定监听：$_addr） ==========="
-  local _l
-  for _l in $PROTO_LETTERS; do
-    hint " $_l. $(eval echo \$PROTO_DESC_$_l)"
-  done
-  reading " 请选择协议字母" _l
-  case " $PROTO_LETTERS " in
-    *" $_l "*) : ;;
-    *) error " 无效的协议字母：$_l" ;;
-  esac
-
-  # 同栈已有该协议 -> 询问覆盖
-  local _old_port
+  # 同栈已有该协议 -> 提示覆盖
   _old_port=$(conf_get "$(item_key "$_f" "$_l" PORT)")
   if [ -n "$_old_port" ]; then
     hint " $(fam_name "$_f") 侧已存在 $(eval echo \$PROTO_DESC_$_l)（端口 $_old_port），将覆盖。"
   fi
 
-  local _port _sug
   _sug=$(suggest_port "$_f")
   [ -n "$_old_port" ] && _sug="$_old_port"
-  reading " 请输入端口（直接回车使用推荐值）" _port "$_sug"
+  reading " 请输入 $(eval echo \$PROTO_DESC_$_l) 的端口（直接回车使用推荐值）" _port "$_sug"
   [[ "$_port" =~ ^[0-9]+$ ]] && [ "$_port" -ge 100 ] && [ "$_port" -le 65535 ] || error " 端口无效：$_port"
   if is_port_conflict "$_port" "$_f" && [ "$_port" != "$_old_port" ]; then
     error " 端口 $_port 已被占用（ArgoX 或本机其他服务）。"
   fi
 
-  local _uuid _pass=''
   _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
   [ -z "$_uuid" ] && _uuid=$(gen_uuid)
   if [ "$_l" = 'm' ]; then
@@ -659,23 +685,54 @@ add_protocol() {   # $1=fam
     c|k|l) ensure_cert ;;
   esac
 
-  # 写 conf
+  # 写 conf（立即落盘，让同批后续协议的端口推荐避开它）
   write_conf "$(item_key "$_f" "$_l" PORT)" "$_port"
   write_conf "$(item_key "$_f" "$_l" UUID)" "$_uuid"
   [ "$_l" = 'm' ] && write_conf "$(item_key "$_f" "$_l" PASS)" "$_pass"
   write_conf 'NODE_NAME' "$NODE_NAME"
-
-  rebuild_json
-  patch_daemon
   fw_allow "$_f" "$_l" "$_port"
-  restart_xray
 
   echo ''
   info " 已添加：$(fam_name "$_f") 侧 $(eval echo \$PROTO_DESC_$_l)（绑定 $_addr:$_port）"
-  local _link
-  _link=$(build_link "$_f" "$_l" "$_port" "$_uuid" "$_pass")
+  ADD_LINK=$(build_link "$_f" "$_l" "$_port" "$_uuid" "$_pass")
   echo ''
-  echo " $_link"
+  echo " $ADD_LINK"
+}
+
+add_protocol() {   # $1=fam
+  local _f="$1" _addr
+  _addr=$(fam_addr "$_f")
+  [ -z "$_addr" ] && error " 未检测到本机 $(fam_name "$_f") 公网地址，无法为 $(fam_name "$_f") 设备单独设置协议。"
+
+  echo ''
+  info "=========== 为 $(fam_name "$_f") 设备添加代理协议（绑定监听：$_addr） ==========="
+  local _l
+  for _l in $PROTO_LETTERS; do
+    hint " $_l. $(eval echo \$PROTO_DESC_$_l)"
+  done
+  hint " 支持一次输入多个字母批量添加（如 bcdlm），a 或回车 = 全部添加"
+
+  # 按 ArgoX 的解析习惯：多字母批量、逐字符过滤合法字母、去重保序、a/空 = 全部
+  local _sel _letters
+  while true; do
+    reading " 请选择协议字母" _sel
+    _letters=$(parse_letters "$_sel")
+    [ -n "$_letters" ] && break
+    hint " 未识别到有效协议字母（可用：$PROTO_LETTERS），请重新输入。"
+  done
+
+  local _cnt=0
+  for _l in $_letters; do
+    ADD_LINK=''
+    add_one_protocol "$_f" "$_l"
+    _cnt=$((_cnt + 1))
+  done
+
+  # 批量完成后统一重建配置、集成服务并重启一次
+  rebuild_json
+  patch_daemon
+  restart_xray
+  info " 共添加/更新 $_cnt 个协议，Xray 已重载。"
 }
 
 delete_protocol() {

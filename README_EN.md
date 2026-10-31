@@ -25,6 +25,7 @@
 
 ## Updates
 
+- **v1.0.1 (2026.10.31)**: Protocol letters now accept batch input (e.g. `bcdlm`, `a` or Enter = all), matching ArgoX's parsing habit; offer one-key ArgoX installation (runs ArgoX's official script) when ArgoX is not installed; fix a field-comparison bug in port-conflict detection (batch adds on one stack could get the same suggested port).
 - **v1.0.0 (2026.10.31)**: First release. Add independent proxy-protocol inbounds per stack (IPv4/IPv6); same port can carry different protocols on different stacks; reuses ArgoX's Reality key pair and self-signed certificate; per-stack firewall rules; Xray service integration and clean uninstall.
 
 ---
@@ -68,7 +69,9 @@ One command runs it interactively (same invocation style as ArgoX), no download 
 bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r
 ~~~
 
-On first run it auto-detects public IPv4/IPv6 addresses and shows the menu. Use menu 1 to add a protocol for IPv6 devices, menu 2 for IPv4 devices.
+On first run it auto-detects public IPv4/IPv6 addresses and shows the menu. Use menu 1 to add a protocol for IPv6 devices, menu 2 for IPv4 devices. If ArgoX is not installed yet, the script offers a one-key ArgoX installation (runs ArgoX's official installer) and then continues.
+
+Protocol selection follows ArgoX's input habit: **you can enter multiple letters at once to add them in batch** (e.g. `bcdlm`), or `a` / plain Enter for all. Each port is confirmed in turn (Enter accepts the suggested value; suggestions avoid conflicts on the same stack), then the config is rebuilt and Xray restarted once.
 
 ---
 

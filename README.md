@@ -25,6 +25,7 @@
 
 ## 更新信息
 
+- **v1.0.1 (2026.10.31)**：协议字母支持一次输入多个批量添加（如 `bcdlm`，`a` 或回车 = 全部），与 ArgoX 的解析习惯一致；未安装 ArgoX 时可选一键安装（调用 ArgoX 官方脚本）；修复端口冲突检测的字段比较错误（同栈批量添加会重复推荐同一端口）。
 - **v1.0.0 (2026.10.31)**：首个版本。支持为 IPv4 / IPv6 分栈添加独立代理协议入站；同端口可按栈区分协议；复用 ArgoX 的 Reality 密钥对与自签证书；分栈防火墙放行；Xray 服务集成与卸载还原。
 
 ---
@@ -68,7 +69,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv
 bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r
 ~~~
 
-首次进入会自动探测公网 IPv4 / IPv6 地址，然后进入菜单。为 IPv6 设备添加协议只需选菜单 1，为 IPv4 设备添加协议选菜单 2。
+首次进入会自动探测公网 IPv4 / IPv6 地址，然后进入菜单。为 IPv6 设备添加协议只需选菜单 1，为 IPv4 设备添加协议选菜单 2。如果服务器还没有安装 ArgoX，脚本会提示并可一键安装 ArgoX（调用 ArgoX 官方安装脚本）后继续。
+
+选择协议时与 ArgoX 的输入习惯一致：**支持一次输入多个字母批量添加**（如 `bcdlm`），`a` 或直接回车 = 全部添加；逐个确认端口（回车用推荐值，同栈自动错开）后一次性重建配置并重启 Xray。
 
 ---
 
