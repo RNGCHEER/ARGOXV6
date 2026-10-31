@@ -53,14 +53,19 @@
 ## Quick Start
 
 ~~~bash
-# Download
-wget -O argoxv6.sh https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh
+bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh)
+~~~
 
-# Make it executable
-chmod +x argoxv6.sh
+Or with curl:
 
-# Run interactively
-./argoxv6.sh
+~~~bash
+bash <(curl -fsSL https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh)
+~~~
+
+One command runs it interactively (same invocation style as ArgoX), no download needed. Command-line flags work the same way, e.g. repair integration:
+
+~~~bash
+bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r
 ~~~
 
 On first run it auto-detects public IPv4/IPv6 addresses and shows the menu. Use menu 1 to add a protocol for IPv6 devices, menu 2 for IPv4 devices.
@@ -131,7 +136,7 @@ Protocol letters follow ArgoX's naming:
 ## FAQ
 
 **After upgrading/reinstalling ArgoX, argoxv6 nodes stopped working?**
-Run ./argoxv6.sh -r or menu 6 to re-integrate argoxv6.json into the Xray service.
+Run bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r or menu 6 to re-integrate argoxv6.json into the Xray service.
 
 **Can IPv4 and IPv6 use the same port with different protocols?**
 Yes. argoxv6 binds the v6 inbound to a specific IPv6 address and the v4 inbound to a specific IPv4 address; the two sockets do not conflict.

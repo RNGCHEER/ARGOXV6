@@ -53,14 +53,19 @@
 ## 快速开始
 
 ~~~bash
-# 下载
-wget -O argoxv6.sh https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh
+bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh)
+~~~
 
-# 赋予执行权限
-chmod +x argoxv6.sh
+或者使用 curl：
 
-# 交互式运行
-./argoxv6.sh
+~~~bash
+bash <(curl -fsSL https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh)
+~~~
+
+一条命令即可交互式运行（与 ArgoX 相同的调用方式），无需下载保存。命令行参数同样适用，例如修复集成：
+
+~~~bash
+bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r
 ~~~
 
 首次进入会自动探测公网 IPv4 / IPv6 地址，然后进入菜单。为 IPv6 设备添加协议只需选菜单 1，为 IPv4 设备添加协议选菜单 2。
@@ -131,7 +136,7 @@ chmod +x argoxv6.sh
 ## 常见问题
 
 **Q：ArgoX 升级 / 重装后 argoxv6 节点失效？**
-执行 ./argoxv6.sh -r 或菜单 6，重新把 argoxv6.json 集成进 Xray 服务。
+执行 bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r 或菜单 6，重新把 argoxv6.json 集成进 Xray 服务。
 
 **Q：能否为 IPv4 和 IPv6 用同一个端口但不同协议？**
 可以。argoxv6 会把 v6 入站绑到具体 IPv6 地址、v4 入站绑到具体 IPv4 地址，两个 socket 互不冲突。
