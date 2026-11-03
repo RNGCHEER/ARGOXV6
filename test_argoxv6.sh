@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# argoxv6.sh 在 WSL mock 环境下的集成测试
+# argoxv6.sh v2.1.0 在 WSL mock 环境下的集成测试
 set -u
 T=/tmp/argoxtest
 rm -rf "$T"
-mkdir -p "$T/bin" "$T/argox"
+mkdir -p "$T/bin" "$T/argox" "$T/systemd" "$T/initd"
 A="$T/argox"
 
 # 归一化 CRLF
@@ -47,7 +47,8 @@ cat > "$A/inbound.json" <<'MOCKEOF'
         }
       }
     }
-  ]
+  ],
+  "api": { "listen": "127.0.0.1:10085" }
 }
 MOCKEOF
 echo '{ "outbounds": [ { "protocol": "freedom", "tag": "direct" } ] }' > "$A/outbound.json"
@@ -59,7 +60,7 @@ publicKey='MOCK_PUBLIC_KEY'
 cdn='www.visa.com'
 MOCKEOF
 
-# ---- 假 xray：x25519 生成 + run -test 用 jq 校验每个 -c 文件 ----
+# ---- 假 xray：x25519 / run -test / api lsi（模拟热挂载查询） ----
 cat > "$A/xray" <<'MOCKEOF'
 #!/usr/bin/env bash
 case "$1" in
@@ -76,19 +77,19 @@ case "$1" in
       fi
     done
     echo "config test ok" ;;
+  api)
+    shift
+    case " $* " in
+      *lsi*)
+        [ -s /tmp/argoxtest/argox/argoxv6.json ] && jq -r '.inbounds[]?.tag // empty' /tmp/argoxtest/argox/argoxv6.json 2>/dev/null
+        ;;
+    esac
+    exit 0 ;;
 esac
 MOCKEOF
 chmod +x "$A/xray"
 
-# ---- 假 systemd unit ----
-cat > "$T/xray.service" <<'MOCKEOF'
-[Service]
-Type=simple
-ExecStart=/etc/argox/xray run -c /etc/argox/inbound.json -c /etc/argox/outbound.json
-Restart=on-failure
-MOCKEOF
-
-# ---- 假 systemctl / wget / curl ----
+# ---- 假 systemd / systemctl / wget / curl ----
 cat > "$T/bin/systemctl" <<'MOCKEOF'
 #!/usr/bin/env bash
 echo "systemctl $*" >> /tmp/argoxtest/systemctl.log
@@ -98,44 +99,10 @@ cat > "$T/bin/wget" <<'MOCKEOF'
 #!/usr/bin/env bash
 case " $* " in
   *argox.sh*) cat /tmp/argoxtest/fake_argox_install.sh ;;
-  *" -6 "*)   echo '{"ip":"2001:db8::1","country":"US","isp":"Mock"}' ;;
-  *)          echo '{"ip":"192.0.2.10","country":"US","isp":"Mock"}' ;;
+  *" -6 "*)   echo '2001:db8::1' ;;
+  *)          echo '192.0.2.10' ;;
 esac
 MOCKEOF
-# 假 ArgoX 官方安装脚本：往 ARGOX_DIR 里放一套最小可用的 ArgoX 文件
-cat > "$T/fake_argox_install.sh" <<'INSTEOF'
-#!/usr/bin/env bash
-D="${ARGOX_DIR:-/etc/argox}"
-mkdir -p "$D"
-cat > "$D/inbound.json" <<'JSONEOF'
-{
-  "inbounds": [
-    {
-      "tag": "reality-vision",
-      "port": 30001,
-      "protocol": "vless",
-      "settings": {
-        "clients": [ { "id": "MOCK-UUID" } ],
-        "decryption": "none"
-      },
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "realitySettings": {
-          "dest": "127.0.0.1:20001",
-          "serverNames": [ "addons.mozilla.org" ],
-          "privateKey": "MOCK_PRIVATE_KEY",
-          "publicKey": "MOCK_PUBLIC_KEY",
-          "shortIds": [ "" ]
-        }
-      }
-    }
-  ]
-}
-JSONEOF
-echo '{ "outbounds": [ { "protocol": "freedom", "tag": "direct" } ] }' > "$D/outbound.json"
-echo "fake ArgoX installed to $D"
-INSTEOF
 cat > "$T/bin/curl" <<'MOCKEOF'
 #!/usr/bin/env bash
 case " $* " in
@@ -145,50 +112,36 @@ esac
 MOCKEOF
 chmod +x "$T/bin/"*
 
-echo '=================== SESSION 1: 添加 v6-b / v4-c，看链接 ==================='
-printf '1\nb\n\n3\n2\nc\n\n3\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
+RUN() { env PATH="$T/bin:$PATH" ARGOX_DIR="$A" SYSTEMD_DIR="$T/systemd" INITD_DIR="$T/initd" ARGOXV6_FLAG="$T/flag" bash "$T/argoxv6.sh" -6 2001:db8::1 "$@"; }
+
+echo '=================== SESSION 1: 添加 v6-b，看链接 ==================='
+printf '2\nb\n\n4\n0\n' | RUN 2>&1 | tail -22
 
 echo ''
 echo '=================== SESSION 1 后的状态 ==================='
-echo '--- argoxv6.json (tags/listens/ports/protocols) ---'
-jq '[.inbounds[] | {tag, listen, port, protocol}]' "$A/argoxv6.json"
-echo '--- reality 密钥复用检查 ---'
-jq -r '.inbounds[] | select(.protocol=="vless") | .streamSettings.realitySettings.privateKey' "$A/argoxv6.json"
-echo '--- argoxv6.conf ---'
-cat "$A/argoxv6.conf"
-echo '--- xray.service (集成补丁) ---'
-cat "$T/xray.service"
-echo '--- systemctl.log ---'
-cat "$T/systemctl.log"
-echo '--- 证书 ---'
-ls -la "$A/cert" 2>/dev/null || echo '(未生成)'
+echo '--- argoxv6.json ---'
+jq -c '[.inbounds[] | {tag, listen, port, protocol}]' "$A/argoxv6.json" 2>/dev/null || echo '(无)'
+echo '--- ArgoX inbound.json 是否被钉成 0.0.0.0（v4-only）---'
+jq -r '[.inbounds[] | "\(.tag):\(.listen // "双栈")"] | join(" , ")' "$A/inbound.json"
 
 echo ''
-echo '=================== SESSION 2: 多字母批量添加 v4-d/v4-m ==================='
-printf '2\ndm\n\n\n3\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
+echo '=================== SESSION 2: 双栈添加 b/m（v4+v6，两侧链接一起出） ==================='
+printf '3\nbm\n\n\n4\n0\n' | RUN 2>&1 | grep -E '双栈|已加入|Base64|vless://|ss://|hysteria2://|trojan://|无效|已被占用'
+echo '--- 监听核对（同一协议 v4/v6 不同 listen）---'
+jq -r '.inbounds[] | "\(.listen)\t\(.port)\t\(.tag)"' "$A/argoxv6.json"
 
 echo ''
-echo '=================== SESSION 2 后: v4 入站清单 ==================='
-jq '[.inbounds[] | select(.listen != "127.0.0.1") | {tag, listen, port, protocol}]' "$A/argoxv6.json"
+echo '=================== SESSION 3: a = 全部添加（v6） ==================='
+printf '2\na\n\n\n\n\n\n\n0\n' | RUN 2>&1 | grep -E '已加入' | head -8
 
 echo ''
-echo '=================== SESSION 3: 字母 a = 全部添加（v6） ==================='
-printf '1\na\n\n\n\n\n\n\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1 | grep -E '已添加|绑定|共添加'
-
-echo ''
-echo '=================== SESSION 4a: 无 ArgoX -> 拒绝安装 ==================='
+echo '=================== SESSION 4: 无 ArgoX（非交互）应明确报错 ==================='
 rm -rf "$T/noargox"
-printf 'n\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$T/noargox" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
+printf '' | env PATH="$T/bin:$PATH" ARGOX_DIR="$T/noargox" SYSTEMD_DIR="$T/systemd" INITD_DIR="$T/initd" ARGOXV6_FLAG="$T/flag" bash "$T/argoxv6.sh" 2>&1 | head -5
 
 echo ''
-echo '=================== SESSION 4b: 无 ArgoX -> 一键安装后进菜单 ==================='
-printf 'y\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$T/noargox" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
-echo '--- 一键安装生成的文件 ---'
-ls "$T/noargox"
-
-echo ''
-echo '=================== SESSION 5: 删 v6-b，卸载 ==================='
-printf '4\n6\nb\n7\ny\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
+echo '=================== SESSION 5: 删除 b（双栈一起）+ 卸载 ==================='
+printf '5\nb\nb\n9\ny\n' | RUN 2>&1 | grep -E '已删除|卸载|未找到|残留'
 
 echo ''
 echo '=================== SESSION 5 后的状态 ==================='
@@ -196,7 +149,7 @@ echo '--- argoxv6.json ---'
 cat "$A/argoxv6.json" 2>/dev/null || echo '(已删除)'
 echo '--- argoxv6.conf ---'
 cat "$A/argoxv6.conf" 2>/dev/null || echo '(已删除)'
-echo '--- xray.service (应还原) ---'
-cat "$T/xray.service"
-echo '--- mock inbound.json 完好性 ---'
-grep -vE '^[[:space:]]*//' "$A/inbound.json" | jq -r '[.inbounds[].tag] | join(",")'
+echo '--- ArgoX inbound.json 完好性 ---'
+jq -r '[.inbounds[].tag] | join(",")' "$A/inbound.json"
+echo '--- drop-in / hook 残留 ---'
+ls "$T/systemd" 2>/dev/null; ls "$A/argoxv6-hook.sh" 2>/dev/null || echo '(hook 已清理)'

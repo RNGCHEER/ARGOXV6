@@ -5,10 +5,12 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/built%20on-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/version-v2.0.0-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/version-v2.1.0-brightgreen.svg)](#)
 
 > A rewrite of [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x.
 > The old version broke ArgoX (see [why the old version broke ArgoX](#why-the-old-version-broke-argox)); v2.0.0 decouples the two sides entirely — **if one side fails, the other keeps running**.
+>
+> **New in v2.1.0**: menu 3 / `-b` dual-stack add (one protocol bound to both IPv4 `0.0.0.0` and IPv6, may share the same port, both node links printed together); menu 4 / `-l` lists all IPv4 + IPv6 nodes per stack plus a **Base64 subscription containing every node**; delete accepts `4 / 6 / b`.
 
 [中文](README.md) | English
 
@@ -115,7 +117,8 @@ The first run auto-detects public IPv4 / IPv6 (no public IPv6 → clear warning,
 
 1. **Menu 1** — add / edit IPv4 nodes inside ArgoX; it syncs on exit.
 2. **Menu 2** — add protocols for IPv6 clients (batch input like `bcdlm`, `a` or Enter = all).
-3. **Menu 3** — copy the IPv6 links into your client.
+3. **Menu 3** — dual-stack add: one protocol bound to both IPv4 + IPv6 (may share one port);
+4. **Menu 4** — list all IPv4 + IPv6 nodes per stack and copy the Base64 subscription into your client.
 
 ---
 
@@ -125,12 +128,13 @@ The first run auto-detects public IPv4 / IPv6 (no public IPv6 → clear warning,
 |---|---|
 | 1 | Manage IPv4 nodes (launches official ArgoX script, auto-syncs on exit) |
 | 2 | Add / replace IPv6 protocols |
-| 3 | Show IPv6 node links |
-| 4 | Delete an IPv6 protocol |
-| 5 | Sync / self-check & repair |
-| 6 | Re-detect IPv6 address |
-| 7 | Show status (including whether each inbound is actually mounted) |
-| 8 | Uninstall |
+| 3 | **Dual-stack add: one protocol bound to both IPv4 + IPv6** |
+| 4 | **Show node links (IPv4 + IPv6, with Base64 subscription)** |
+| 5 | Delete a protocol (stack `4` / `6` / `b`) |
+| 6 | Sync / self-check & repair |
+| 7 | Re-detect IPv6 address |
+| 8 | Show status (including whether each inbound is actually mounted) |
+| 9 | Uninstall |
 | 0 | Exit |
 
 Command-line arguments:
@@ -138,7 +142,8 @@ Command-line arguments:
 ```bash
 bash argoxv6.sh                 # interactive menu
 bash argoxv6.sh -s              # sync / self-check
-bash argoxv6.sh -l              # print IPv6 links only
+bash argoxv6.sh -b              # jump straight into dual-stack add (IPv4 + IPv6 nodes together)
+bash argoxv6.sh -l              # print all IPv4 + IPv6 links (with Base64 subscription)
 bash argoxv6.sh -u              # uninstall
 bash argoxv6.sh -6 2001:db8::1  # force bind address (NAT66 / multi-address)
 bash argoxv6.sh -v              # version
@@ -147,7 +152,7 @@ bash argoxv6.sh -h              # help (print script header)
 
 ---
 
-## Supported IPv6 protocols
+## Supported protocols (IPv6 side; also used for the IPv4 side when dual-stack adding)
 
 | Letter | Protocol | Transport | Notes |
 |---|---|---|---|

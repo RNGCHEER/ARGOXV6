@@ -1,11 +1,13 @@
 # ArgoXV6 v2
 
-**ArgoX 只管 IPv4，argoxv6 只管 IPv6 —— 互不干扰的 ArgoX 双栈分工助手**
+**ArgoX 只管 IPv4，argoxv6 只管 IPv6 —— 互不干扰的 ArgoX 双栈助手；也支持「双栈添加」一次同时输出 V4 + V6 节点**
+
+> **v2.1.0 新增**：菜单 3 / `-b` 双栈添加（同一协议同时绑 IPv4 0.0.0.0 与 IPv6，可复用同一端口，两个节点链接一起出）；菜单 4 / `-l` 按栈同时列出 V4+V6 全部节点并附**含全部节点的 Base64 订阅**；删除支持 `4 / 6 / b`。
 
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/基于-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/系统-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/版本-v2.0.0-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/版本-v2.1.0-brightgreen.svg)](#)
 
 > 这是 [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x 的重写版本。
 > 旧版会与 ArgoX 互相破坏（详见 [为什么旧版会把 ArgoX 搞坏](#为什么旧版会把-argox-搞坏)）；v2.0.0 从架构上彻底解耦：**任一侧出问题，另一侧照常运行**。
@@ -22,7 +24,7 @@
 - [新版架构](#新版架构)
 - [快速开始](#快速开始)
 - [菜单与命令行](#菜单与命令行)
-- [支持的 IPv6 协议](#支持的-ipv6-协议)
+- [支持的协议](#支持的协议ipv6-侧双栈添加时同样用于-ipv4-侧)
 - [文件清单](#文件清单)
 - [环境变量](#环境变量)
 - [常见问题](#常见问题)
@@ -57,6 +59,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv
 - **ArgoX（v4 侧）**：把 ArgoX 直连入站的 `listen` 钉成 `0.0.0.0`，只监听 IPv4（WS / XHTTP 隧道类 `127.0.0.1` 入站一律不碰）。
 - **argoxv6（v6 侧）**：为 IPv6 设备提供独立的协议 / 端口 / 凭据（Reality、Hysteria2、gRPC、XHTTP-H3、Trojan、SS2022）。
 - **菜单 1 直接调用 ArgoX**：管理 v4 节点不用退出本脚本，退出后自动同步。
+- **双栈添加（菜单 3 / `-b`）**：v4 侧由 argoxv6 直接建入站（`listen 0.0.0.0`），v6 侧绑本机 IPv6，同一协议两个节点、链接与订阅一次给全，ArgoX 依旧不受影响。
 - **IPv6 地址自愈**：VPS 换 IPv6 前缀后，重启 Xray 即自动校正监听地址。
 - **开机守护**：systemd drop-in（带 `-` 前缀，hook 失效也绝不阻塞 Xray 启动）/ OpenRC 独立服务。
 - **幂等热挂载**：v6 入站经 Xray gRPC API 挂载，配置哈希没变就不发一条指令，不反复断连。
@@ -115,7 +118,8 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 
 1. **菜单 1**：进入 ArgoX 添加 / 修改 IPv4 节点，退出后自动同步；
 2. **菜单 2**：为 IPv6 设备添加协议（支持 `bcdlm` 批量输入，`a` 或回车 = 全部）；
-3. **菜单 3**：复制 IPv6 节点链接到客户端。
+3. **菜单 3**：双栈添加 —— 同一协议同时出 IPv4 + IPv6 节点（可复用同一端口）；
+4. **菜单 4**：按栈查看 IPv4 + IPv6 全部节点链接，并给出含全部节点的 Base64 订阅，复制到客户端即可。
 
 ---
 
@@ -125,12 +129,13 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 |---|---|
 | 1 | 管理 IPv4 节点（调用 ArgoX 官方脚本，退出自动同步） |
 | 2 | 为 IPv6 添加 / 更换协议 |
-| 3 | 查看 IPv6 节点链接 |
-| 4 | 删除某个 IPv6 协议 |
-| 5 | 一键同步 / 自检修复 |
-| 6 | 重新探测 IPv6 地址 |
-| 7 | 查看当前状态（含每个入站是否真的挂载） |
-| 8 | 卸载 |
+| 3 | **双栈添加：同一协议同时出 IPv4 + IPv6 节点** |
+| 4 | **查看节点链接（IPv4 + IPv6，含 Base64 订阅）** |
+| 5 | 删除某个协议（栈可选 `4` / `6` / `b`） |
+| 6 | 一键同步 / 自检修复 |
+| 7 | 重新探测 IPv6 地址 |
+| 8 | 查看当前状态（含每个入站是否真的挂载） |
+| 9 | 卸载 |
 | 0 | 退出 |
 
 命令行参数：
@@ -138,7 +143,8 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 ```bash
 bash argoxv6.sh                # 交互菜单
 bash argoxv6.sh -s             # 同步 / 自检修复
-bash argoxv6.sh -l             # 只输出 IPv6 链接
+bash argoxv6.sh -b             # 直接进入双栈添加（同一协议同时出 IPv4 + IPv6）
+bash argoxv6.sh -l             # 同时输出 IPv4 + IPv6 全部节点链接（含 Base64 订阅）
 bash argoxv6.sh -u             # 卸载
 bash argoxv6.sh -6 2001:db8::1 # 手动指定绑定地址（NAT66 / 多地址场景）
 bash argoxv6.sh -v             # 版本
@@ -147,7 +153,7 @@ bash argoxv6.sh -h             # 帮助（打印脚本头部说明）
 
 ---
 
-## 支持的 IPv6 协议
+## 支持的协议（IPv6 侧；双栈添加时同样用于 IPv4 侧）
 
 | 字母 | 协议 | 传输 | 说明 |
 |---|---|---|---|
@@ -158,7 +164,7 @@ bash argoxv6.sh -h             # 帮助（打印脚本头部说明）
 | l | Trojan Direct | TCP | 自签证书 |
 | m | Shadowsocks 2022 | TCP/UDP | 2022-blake3-aes-128-gcm |
 
-端口默认从 **35000** 起自动错开，强制避开 ArgoX 已占用端口及本机其他 IPv6 监听。
+端口默认从 **35000** 起自动错开，强制避开 ArgoX 已占用端口及本机其他监听。双栈添加时同一个端口会同时用在 IPv4（`0.0.0.0`）与 IPv6 上 —— 两侧地址族不同，socket 互不冲突。
 
 ---
 

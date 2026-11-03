@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  argoxv6.sh  v2.0.0  (2026.10.31)
-#  ArgoX 双栈分工助手 —— ArgoX 只管 IPv4，argoxv6 只管 IPv6
+#  argoxv6.sh  v2.1.0  (2026.11.03)
+#  ArgoX 双栈助手 —— ArgoX 管 IPv4，argoxv6 管 IPv6；并支持「双栈添加」一次输出两栈节点
+#
+#  【v2.1.0 新增：双栈添加】
+#    · 菜单 3 / -b：同一协议同时绑到 IPv4(0.0.0.0) 与 IPv6(本机 GUA)，
+#      两侧可复用同一端口（不同地址族 socket 互不冲突）；
+#      生成的 v4 入站同样走 Xray API 热挂载，ArgoX 完全不受影响。
+#    · 菜单 4 / -l：按栈分组同时列出 IPv4 + IPv6 全部节点，
+#      并附一份含全部节点的 Base64 订阅（可整串导入客户端）。
+#    · 删除支持 4 / 6 / b（b = 两栈一起删）。
 # =============================================================================
 #
 #  【为什么旧版 argoxv6 会把 ArgoX 搞坏】
@@ -34,7 +42,8 @@
 #
 #  用法：
 #    bash argoxv6.sh            交互菜单
-#    bash argoxv6.sh -l         只输出 IPv6 节点链接
+#    bash argoxv6.sh -b         直接进入双栈添加（同一协议同时出 IPv4+IPv6 节点）
+#    bash argoxv6.sh -l         同时输出 IPv4 + IPv6 全部节点链接（含 Base64 订阅）
 #    bash argoxv6.sh -s         一键同步 / 自检修复
 #    bash argoxv6.sh -u         卸载（还原 ArgoX）
 #    bash argoxv6.sh -6 <addr>  手动指定 IPv6 绑定地址
@@ -168,19 +177,21 @@ del_conf_prefix() {
 }
 
 load_conf() {
-  V6_BIND='' V6_PUB='' NODE_NAME='' HOOKS=''
+  V6_BIND='' V6_PUB='' V4_PUB='' NODE_NAME='' HOOKS=''
   [ -s "$V6_CONF" ] && . "$V6_CONF"
 }
 
 item_key() { echo "ITEM_$1_$2_$3"; }   # FAM LETTER FIELD -> conf key
 
-# 列出条目：每行 "6 b 35000"
+# 列出条目：每行 "FAM LETTER PORT"（FAM = 4 | 6）
 list_items() {
   [ -s "$V6_CONF" ] || return 0
-  sed -n "s/^ITEM_6_\([bcdklm]\)_PORT='\{0,1\}\([0-9]\+\)'\{0,1\}$/6 \1 \2/p" "$V6_CONF" | sort
+  sed -n "s/^ITEM_\([46]\)_\([bcdklm]\)_PORT='\{0,1\}\([0-9]\+\)'\{0,1\}$/\1 \2 \3/p" "$V6_CONF" | sort
 }
 
-item_tag() { echo "$NODE_NAME argoxv6-v6-$(proto_name "$1")"; }
+item_tag() { echo "$NODE_NAME argoxv6-v$1-$(proto_name "$2")"; }   # $1=fam $2=letter
+
+fam_label() { [ "$1" = '4' ] && echo 'IPv4' || echo 'IPv6'; }
 
 # ---------------------------------------------------------------------------
 # ArgoX 环境
@@ -313,6 +324,46 @@ detect_v6() {
 
   [ -n "$_new" ] && [ "$_new" != "$_old" ] && return 0
   return 1
+}
+
+# IPv4 地址探测：绑定地址用不上（v4 侧统一 listen 0.0.0.0），
+# 但链接里的主机名需要公网 IPv4
+is_v4_addr() { [[ "${1:-}" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; }
+
+detect_v4_bind() {
+  local _if _a=''
+  _if=$(ip -4 route show default 2>/dev/null | awk '/default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+  [ -n "$_if" ] && _a=$(ip -4 addr show dev "$_if" 2>/dev/null | sed -n 's#.*inet \([^/]*\)/[0-9]*.*global.*#\1#p' | head -n1)
+  [ -z "$_a" ] && _a=$(ip -4 addr show scope global 2>/dev/null | sed -n 's#.*inet \([^/]*\)/[0-9]*.*global.*#\1#p' | head -n1)
+  echo "$_a"
+}
+
+detect_v4_pub() {
+  local _a=''
+  # 1) ArgoX custom 里的 serverIp 若是 IPv4，优先使用（与 ArgoX 订阅保持一致）
+  is_v4_addr "$SERVER_IP" && { echo "$SERVER_IP"; return 0; }
+  # 2) 在线探测
+  command -v curl >/dev/null 2>&1 && _a=$(curl -4 -fsS --max-time 5 https://ipv4.icanhazip.com 2>/dev/null | head -n1)
+  if [ -z "$_a" ] && command -v wget >/dev/null 2>&1; then
+    _a=$(wget -4 -qO- --tries=1 --timeout=5 https://ipv4.icanhazip.com 2>/dev/null | head -n1)
+  fi
+  if [ -z "$_a" ] && command -v curl >/dev/null 2>&1; then
+    _a=$(curl -4 -fsS --max-time 5 https://ip.cloudflare.now.cc 2>/dev/null | awk -F'"' '/"ip"/{print $4; exit}')
+  fi
+  # 3) 兜底：本机网卡地址
+  [ -z "$_a" ] && _a=$(detect_v4_bind)
+  echo "$_a" | tr -d '\r\n'
+}
+
+# 探测并落盘；地址变化返回 0
+detect_v4() {
+  local _pub
+  _pub=$(detect_v4_pub)
+  is_v4_addr "$_pub" || return 1
+  if [ "$_pub" = "$(conf_get V4_PUB)" ]; then V4_PUB="$_pub"; return 1; fi
+  V4_PUB="$_pub"
+  write_conf 'V4_PUB' "$V4_PUB"
+  return 0
 }
 
 host_for_link() { is_v6 "$1" && echo "[$1]" || echo "$1"; }
@@ -509,10 +560,13 @@ refresh_v6() {
   JQ=$(find_jq); [ -n "$JQ" ] || return 0
   [ -s "$V6_JSON" ] || return 0
   NEW=$(detect_v6); [ -n "$NEW" ] || return 0
-  OLD=$("$JQ" -r '[.inbounds[]?.listen // empty] | .[0] // empty' "$V6_JSON" 2>/dev/null)
+  # 只改 v6 入站的 listen（tag 含 -v6-）；v4 入站固定 0.0.0.0，绝不能跟着改
+  OLD=$("$JQ" -r '[.inbounds[]? | select((.tag // "") | contains("-v6-")) | .listen // empty] | .[0] // empty' "$V6_JSON" 2>/dev/null)
   [ -n "$OLD" ] || return 0
   [ "$OLD" = "$NEW" ] && return 0
-  sed -i "s|\"listen\"[[:space:]]*:[[:space:]]*\"$OLD\"|\"listen\": \"$NEW\"|g" "$V6_JSON" 2>/dev/null
+  TMP="$V6_JSON.new.$$"
+  "$JQ" --arg a "$OLD" --arg b "$NEW" '(.inbounds[]? | select((.tag // "") | contains("-v6-")) | select(.listen == $a)) |= (.listen = $b)' "$V6_JSON" > "$TMP" 2>/dev/null
+  if [ -s "$TMP" ] && "$JQ" empty "$TMP" >/dev/null 2>&1; then mv -f "$TMP" "$V6_JSON"; else rm -f "$TMP"; fi
   [ -s "$V6_CONF" ] && sed -i "s|^V6_BIND=.*|V6_BIND='$NEW'|" "$V6_CONF" 2>/dev/null
   return 0
 }
@@ -725,24 +779,52 @@ port_free_on_v6() {
   return 0
 }
 
-is_port_conflict() {
-  local _p="$1" _it _f _l
-  # 1) ArgoX 占用的端口：一律避开（保证 v4 侧不动、也不会互相踩）
-  grep -qx "$_p" <<< "$(argox_ports)" && return 0
-  # 2) 自己已用的 v6 端口
-  while IFS= read -r _it; do
-    [ -z "$_it" ] && continue
-    set -- $_it
-    [ "$3" = "$_p" ] && return 0
-  done <<< "$(list_items)"
-  # 3) 系统里别的 v6 监听
-  port_free_on_v6 "$_p" && return 1
+# 该端口能否在 v4 上监听（0.0.0.0 通配）：只有"IPv4 通配/具体 IPv4/回环"才妨碍
+port_free_on_v4() {
+  local _p="$1" _addrs _a
+  command -v ss >/dev/null 2>&1 || return 0
+  _addrs=$(ss -H -lntu 2>/dev/null | awk '{print $4}' | grep -E "[:.]${_p}\$" 2>/dev/null)
+  while IFS= read -r _a; do
+    [ -z "$_a" ] && continue
+    case "$_a" in
+      \[*\]:*|*::*) continue ;;                             # 纯 IPv6 监听：不影响 v4
+      0.0.0.0:*|127.*) return 1 ;;                            # IPv4 通配/回环：冲突
+      [0-9]*.[0-9]*.[0-9]*.[0-9]*:*) return 1 ;;              # 具体 IPv4：与 0.0.0.0 冲突
+      *) return 1 ;;
+    esac
+  done <<< "$_addrs"
   return 0
 }
 
-suggest_port() {
+is_port_conflict() {   # $1=port $2=fam（默认 6，保持旧调用兼容）
+  local _p="$1" _f="${2:-6}" _it
+  # 1) ArgoX 占用的端口：一律避开（保证 v4 侧不动、也不会互相踩）
+  grep -qx "$_p" <<< "$(argox_ports)" && return 0
+  # 2) 自己已用的同栈端口（异栈同端口允许：绑不同地址，socket 不冲突）
+  while IFS= read -r _it; do
+    [ -z "$_it" ] && continue
+    set -- $_it
+    [ "$3" = "$_p" ] && [ "$1" = "$_f" ] && return 0
+  done <<< "$(list_items)"
+  # 3) 系统里同地址族的其它监听
+  if [ "$_f" = '4' ]; then
+    port_free_on_v4 "$_p" && return 1
+  else
+    port_free_on_v6 "$_p" && return 1
+  fi
+  return 0
+}
+
+suggest_port() {   # $1=fam（默认 6）
+  local _f="${1:-6}" _p=35000
+  while is_port_conflict "$_p" "$_f"; do _p=$((_p + 1)); done
+  echo "$_p"
+}
+
+# 双栈：找一个在 v4 与 v6 两侧都空闲的端口
+suggest_port_dual() {
   local _p=35000
-  while is_port_conflict "$_p"; do _p=$((_p + 1)); done
+  while is_port_conflict "$_p" 6 || is_port_conflict "$_p" 4; do _p=$((_p + 1)); done
   echo "$_p"
 }
 
@@ -799,15 +881,17 @@ EOF
 # ---------------------------------------------------------------------------
 # 生成 v6 入站（listen 绑本机 IPv6 地址）
 # ---------------------------------------------------------------------------
-build_block() {   # $1=letter $2=port $3=uuid/pass $4=pass(ss)
-  local _l="$1" _port="$2" _cred="$3" _pass="$4" _tag _path
-  _tag=$(item_tag "$_l")
-  _path="argoxv6-$_l"
+build_block() {   # $1=fam $2=letter $3=port $4=uuid/pass $5=pass(ss)
+  local _fam="$1" _l="$2" _port="$3" _cred="$4" _pass="$5" _tag _path _listen
+  _tag=$(item_tag "$_fam" "$_l")
+  _path="argoxv6-v$_fam-$_l"
+  # v6：绑本机公网 IPv6；v4：统一 0.0.0.0（与 v2.0.0 的 v4 加固思路一致，换 IP 也不慌）
+  if [ "$_fam" = '4' ]; then _listen='0.0.0.0'; else _listen="$V6_BIND"; fi
   case "$_l" in
     b) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$V6_BIND",
+      "listen": "$_listen",
       "port": $_port,
       "protocol": "vless",
       "settings": {
@@ -834,7 +918,7 @@ JSONEOF
     d) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$V6_BIND",
+      "listen": "$_listen",
       "port": $_port,
       "protocol": "vless",
       "settings": {
@@ -862,7 +946,7 @@ JSONEOF
     c) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$V6_BIND",
+      "listen": "$_listen",
       "port": $_port,
       "protocol": "hysteria",
       "settings": {
@@ -884,7 +968,7 @@ JSONEOF
     k) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$V6_BIND",
+      "listen": "$_listen",
       "port": $_port,
       "protocol": "vless",
       "settings": {
@@ -912,7 +996,7 @@ JSONEOF
     l) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$V6_BIND",
+      "listen": "$_listen",
       "port": $_port,
       "protocol": "trojan",
       "settings": {
@@ -933,7 +1017,7 @@ JSONEOF
     m) cat << JSONEOF
     {
       "tag": "$_tag",
-      "listen": "$V6_BIND",
+      "listen": "$_listen",
       "port": $_port,
       "protocol": "shadowsocks",
       "settings": {
@@ -951,8 +1035,8 @@ JSONEOF
 rebuild_json() {
   local _blocks='' _sep='' _it _f _l _port _uuid _pass
 
-  # 没有 IPv6 地址时绝不能生成空 listen 的配置（空 listen = 双栈，会踩 ArgoX 的端口）
-  if [ -z "$V6_BIND" ] && [ -n "$(list_items)" ]; then
+  # 有 v6 条目但没探测到 IPv6 地址时不能生成（空 listen = 双栈，会踩 ArgoX 的端口）
+  if [ -z "$V6_BIND" ] && grep -q '^ITEM_6_' "$V6_CONF" 2>/dev/null; then
     warning " 未获取到本机 IPv6 地址，已跳过配置生成（现有 v6 节点不动）。"
     return 1
   fi
@@ -963,7 +1047,7 @@ rebuild_json() {
     _f="$1" _l="$2" _port="$3"
     _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
     _pass=$(conf_get "$(item_key "$_f" "$_l" PASS)")
-    _blocks="$_blocks$_sep$(build_block "$_l" "$_port" "$_uuid" "$_pass")"
+    _blocks="$_blocks$_sep$(build_block "$_f" "$_l" "$_port" "$_uuid" "$_pass")"
     _sep=$',\n'
   done <<< "$(list_items)"
 
@@ -997,7 +1081,7 @@ verify_v6() {
     [ -z "$_it" ] && continue
     set -- $_it
     _f="$1" _l="$2"
-    _tag=$(item_tag "$_l")
+    _tag=$(item_tag "$_f" "$_l")
     if grep -qxF "$_tag" "$_lf" 2>/dev/null; then
       _ok=$((_ok + 1))
     else
@@ -1054,7 +1138,7 @@ sync_all() {
 fw_backend() {
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then echo ufw
   elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then echo firewalld
-  elif command -v ip6tables >/dev/null 2>&1; then echo ip6tables
+  elif command -v ip6tables >/dev/null 2>&1 || command -v iptables >/dev/null 2>&1; then echo netfilter
   else echo none; fi
 }
 
@@ -1068,52 +1152,65 @@ fw_protos() {
 
 persist_iptables() {
   if [ -d /etc/iptables ]; then
+    iptables-save  > /etc/iptables/rules.v4 2>/dev/null || true
     ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
   elif command -v netfilter-persistent >/dev/null 2>&1; then
     netfilter-persistent save >/dev/null 2>&1 || true
   fi
 }
 
-fw_allow() {   # $1=letter $2=port
-  local _l="$1" _p="$2" _be _t
+# 同地址族的 netfilter 命令：v4 -> iptables，v6 -> ip6tables
+fw_bin_for() { [ "$1" = '4' ] && echo iptables || echo ip6tables; }
+
+fw_allow() {   # $1=fam $2=letter $3=port
+  local _f="$1" _l="$2" _p="$3" _be _t _bin
   _be=$(fw_backend)
+  _bin=$(fw_bin_for "$_f")
   for _t in $(fw_protos "$_l"); do
     case "$_be" in
-      ufw) ufw allow "$_p/$_t" comment 'argoxv6' >/dev/null 2>&1 ;;
+      ufw) ufw allow "$_p/$_t" comment "argoxv6" >/dev/null 2>&1 ;;
       firewalld) firewall-cmd --permanent --add-port="$_p/$_t" >/dev/null 2>&1 ;;
-      ip6tables)
-        ip6tables -C INPUT -p "$_t" --dport "$_p" -m comment --comment 'argoxv6' -j ACCEPT 2>/dev/null \
-          || ip6tables -I INPUT -p "$_t" --dport "$_p" -m comment --comment 'argoxv6' -j ACCEPT 2>/dev/null ;;
+      netfilter)
+        command -v "$_bin" >/dev/null 2>&1 || continue
+        "$_bin" -C INPUT -p "$_t" --dport "$_p" -m comment --comment "argoxv6" -j ACCEPT 2>/dev/null \
+          || "$_bin" -I INPUT -p "$_t" --dport "$_p" -m comment --comment "argoxv6" -j ACCEPT 2>/dev/null ;;
     esac
   done
   [ "$_be" = 'firewalld' ] && firewall-cmd --reload >/dev/null 2>&1
-  [ "$_be" = 'ip6tables' ] && persist_iptables
-  [ "$_be" = 'none' ] && hint " 未检测到防火墙，请自行放行 IPv6 端口 $_p/$_t"
+  [ "$_be" = 'netfilter' ] && persist_iptables
+  [ "$_be" = 'none' ] && hint " 未检测到防火墙，请自行放行 $(fam_label "$_f") 端口 $_p"
   return 0
 }
 
-fw_deny() {    # $1=letter $2=port
-  local _l="$1" _p="$2" _be _t
+fw_deny() {    # $1=fam $2=letter $3=port
+  local _f="$1" _l="$2" _p="$3" _be _t _bin
   _be=$(fw_backend)
+  _bin=$(fw_bin_for "$_f")
   for _t in $(fw_protos "$_l"); do
     case "$_be" in
       ufw) ufw delete allow "$_p/$_t" >/dev/null 2>&1 ;;
       firewalld) firewall-cmd --permanent --remove-port="$_p/$_t" >/dev/null 2>&1 ;;
-      ip6tables) ip6tables -D INPUT -p "$_t" --dport "$_p" -m comment --comment 'argoxv6' -j ACCEPT 2>/dev/null ;;
+      netfilter)
+        command -v "$_bin" >/dev/null 2>&1 || continue
+        "$_bin" -D INPUT -p "$_t" --dport "$_p" -m comment --comment "argoxv6" -j ACCEPT 2>/dev/null ;;
     esac
   done
   [ "$_be" = 'firewalld' ] && firewall-cmd --reload >/dev/null 2>&1
-  [ "$_be" = 'ip6tables' ] && persist_iptables
+  [ "$_be" = 'netfilter' ] && persist_iptables
   return 0
 }
 
 # ---------------------------------------------------------------------------
 # 节点链接
 # ---------------------------------------------------------------------------
-build_link() {   # $1=letter $2=port $3=uuid $4=pass
-  local _l="$1" _port="$2" _cred="$3" _pass="$4" _h _n
-  _h=$(host_for_link "${V6_PUB:-$V6_BIND}")
-  _n=$(item_tag "$_l")
+build_link() {   # $1=fam $2=letter $3=port $4=uuid $5=pass
+  local _f="$1" _l="$2" _port="$3" _cred="$4" _pass="$5" _h _n
+  if [ "$_f" = '4' ]; then
+    _h=$(host_for_link "${V4_PUB:-$SERVER_IP}")
+  else
+    _h=$(host_for_link "${V6_PUB:-$V6_BIND}")
+  fi
+  _n=$(item_tag "$_f" "$_l")
   _n=${_n// /%20}
   case "$_l" in
     b) echo "vless://${_cred}@${_h}:${_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${TLS_SERVER}&fp=${FINGER_PRINT}&pbk=${REALITY_PUBLIC}&type=tcp&headerType=none#${_n}" ;;
@@ -1128,52 +1225,74 @@ build_link() {   # $1=letter $2=port $3=uuid $4=pass
 }
 
 show_links() {
-  local _it _f _l _port _uuid _pass _any='no'
-  [ -n "$V6_BIND" ] || { warning " 未检测到 IPv6 地址，链接中的主机名会缺失；请先执行菜单 6。"; }
-  while IFS= read -r _it; do
-    [ -z "$_it" ] && continue
-    set -- $_it
-    _f="$1" _l="$2" _port="$3"
-    _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
-    _pass=$(conf_get "$(item_key "$_f" "$_l" PASS)")
-    if [ "$_any" = 'no' ]; then
+  local _it _f _l _port _uuid _pass _all='' _any='no' _fam _cnt _link
+  for _fam in 4 6; do
+    _cnt=0
+    while IFS= read -r _it; do
+      [ -z "$_it" ] && continue
+      set -- $_it
+      [ "$1" = "$_fam" ] || continue
+      _f="$1" _l="$2" _port="$3"
+      _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
+      _pass=$(conf_get "$(item_key "$_f" "$_l" PASS)")
+      if [ "$_cnt" -eq 0 ]; then
+        echo ''
+        if [ "$_fam" = '4' ]; then
+          info "============ IPv4 节点（listen 0.0.0.0，公网 ${V4_PUB:-未探测}）============"
+        else
+          info "============ IPv6 节点（listen ${V6_BIND:-未检测到}）============"
+        fi
+      fi
+      _cnt=$((_cnt + 1)); _any='yes'
+      _link=$(build_link "$_f" "$_l" "$_port" "$_uuid" "$_pass")
+      plain "$(proto_desc "$_l")  ·  端口 $_port"
+      plain "$_link"
+      _all="$_all$_link"$'\n'
       echo ''
-      info "============ IPv6 专用节点（监听 $V6_BIND）============"
-    fi
-    _any='yes'
-    plain "$(proto_desc "$_l")  ·  端口 $_port"
-    plain "$(build_link "$_l" "$_port" "$_uuid" "$_pass")"
-    echo ''
-  done <<< "$(list_items)"
-  [ "$_any" = 'no' ] && hint " 还没有配置任何 IPv6 节点（菜单 2 添加）。"
+    done <<< "$(list_items)"
+  done
+  [ "$_any" = 'no' ] && { hint " 还没有配置任何节点（菜单 2 加 IPv6，菜单 3 双栈一起加）。"; return 0; }
+
+  # 合并订阅：一次导入全部 IPv4 + IPv6 节点
+  local _blob
+  _blob=$(printf '%s' "$_all" | base64 -w0 2>/dev/null || printf '%s' "$_all" | base64)
+  echo ''
+  info "============ 全部节点 Base64 订阅（同时含 IPv4 + IPv6）============"
+  plain "$_blob"
+  echo ''
+  hint " 可将整串 Base64 作为订阅内容导入（Clash / v2rayN / Shadowrocket 等）。"
   return 0
 }
 
 # ---------------------------------------------------------------------------
 # 动作：添加 / 删除 / 刷新 / 状态 / 调用 ArgoX / 卸载
 # ---------------------------------------------------------------------------
-add_one() {   # $1=letter
-  local _l="$1" _old _port _uuid _pass=''
-  _old=$(conf_get "$(item_key 6 "$_l" PORT)")
+add_one() {   # $1=fam $2=letter [$3=port（双栈时由调用方给定）]
+  local _f="$1" _l="$2" _given="${3:-}" _old _port _uuid _pass=''
+  _old=$(conf_get "$(item_key "$_f" "$_l" PORT)")
   if [ -n "$_old" ]; then
-    hint " 已存在 $(proto_desc "$_l")（端口 $_old），将覆盖。"
+    hint " 已存在 $(fam_label "$_f") $(proto_desc "$_l")（端口 $_old），将覆盖。"
   fi
 
-  local _sug
-  _sug=$(suggest_port)
-  [ -n "$_old" ] && _sug="$_old"
-  reading " $(proto_desc "$_l") 端口（回车用推荐值）" _port "$_sug"
+  if [ -n "$_given" ]; then
+    _port="$_given"
+  else
+    local _sug
+    _sug=$(suggest_port "$_f")
+    [ -n "$_old" ] && _sug="$_old"
+    reading " $(proto_desc "$_l") 端口（回车用推荐值）" _port "$_sug"
+  fi
   if ! [[ "$_port" =~ ^[0-9]+$ ]]; then warning " 端口无效：$_port"; return 1; fi
   if [ "$_port" -lt 1 ] || [ "$_port" -gt 65535 ]; then warning " 端口超出范围：$_port"; return 1; fi
-  if [ "$_port" != "$_old" ] && is_port_conflict "$_port"; then
-    warning " 端口 $_port 已被占用（ArgoX 或本机其他服务），已跳过 $(proto_desc "$_l")。"
+  if [ "$_port" != "$_old" ] && is_port_conflict "$_port" "$_f"; then
+    warning " 端口 $_port 在 $(fam_label "$_f") 侧已被占用（ArgoX 或本机其他服务），已跳过 $(proto_desc "$_l")。"
     return 1
   fi
 
-  _uuid=$(conf_get "$(item_key 6 "$_l" UUID)")
+  _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
   [ -z "$_uuid" ] && _uuid=$(gen_uuid)
   if [ "$_l" = 'm' ]; then
-    _pass=$(conf_get "$(item_key 6 "$_l" PASS)")
+    _pass=$(conf_get "$(item_key "$_f" "$_l" PASS)")
     [ -z "$_pass" ] && _pass=$(rand_b64_16)
   fi
 
@@ -1182,22 +1301,42 @@ add_one() {   # $1=letter
     c|k|l) ensure_cert ;;
   esac
 
-  write_conf "$(item_key 6 "$_l" PORT)" "$_port"
-  write_conf "$(item_key 6 "$_l" UUID)" "$_uuid"
-  [ "$_l" = 'm' ] && write_conf "$(item_key 6 "$_l" PASS)" "$_pass"
+  write_conf "$(item_key "$_f" "$_l" PORT)" "$_port"
+  write_conf "$(item_key "$_f" "$_l" UUID)" "$_uuid"
+  [ "$_l" = 'm' ] && write_conf "$(item_key "$_f" "$_l" PASS)" "$_pass"
   write_conf 'NODE_NAME' "$NODE_NAME"
 
-  fw_allow "$_l" "$_port"
+  fw_allow "$_f" "$_l" "$_port"
   echo ''
-  info " ✓ 已加入：$(proto_desc "$_l")  →  [${V6_BIND}]:${_port}"
+  if [ "$_f" = '4' ]; then
+    info " ✓ 已加入 IPv4：$(proto_desc "$_l")  →  0.0.0.0:${_port}"
+  else
+    info " ✓ 已加入 IPv6：$(proto_desc "$_l")  →  [${V6_BIND}]:${_port}"
+  fi
   return 0
 }
 
-add_protocol() {
-  [ -n "$V6_BIND" ] || error " 本机没有可用的公网 IPv6 地址，v6 侧无法配置。"
+add_protocol() {   # $1=fam: 6（默认）| 4 | b（双栈：同一协议同时绑 v4+v6）
+  local _fam="${1:-6}" _dual='no' _fams _f _l
+  if [ "$_fam" = 'b' ]; then _dual='yes'; _fams='6 4'; else _fams="$_fam"; fi
+  for _f in $_fams; do
+    if [ "$_f" = '6' ]; then
+      [ -n "$V6_BIND" ] || error " 本机没有可用的公网 IPv6 地址，v6 侧无法配置。"
+    elif [ -z "$V4_PUB" ]; then
+      hint " 未探测到公网 IPv4，v4 节点链接里的主机名可能缺失（可稍后执行菜单 6 重探）。"
+    fi
+  done
+
   echo ''
-  info "=========== 为 IPv6 设备添加代理协议（绑定 $V6_BIND）==========="
-  local _l
+  if [ "$_dual" = 'yes' ]; then
+    info "=========== 双栈添加：同一协议同时绑 IPv4 + IPv6 ==========="
+    plain " · IPv4 侧 listen 0.0.0.0；IPv6 侧 listen ${V6_BIND}"
+    plain " · 两侧可复用同一端口（不同地址族，socket 不冲突），两个节点链接一起输出"
+  elif [ "$_fam" = '4' ]; then
+    info "=========== 为 IPv4 设备添加协议（listen 0.0.0.0）==========="
+  else
+    info "=========== 为 IPv6 设备添加协议（绑定 $V6_BIND）==========="
+  fi
   for _l in $PROTO_LETTERS; do hint " $_l. $(proto_desc "$_l")"; done
   hint " 可一次输入多个字母（如 bcdlm），a 或回车 = 全部"
 
@@ -1209,12 +1348,40 @@ add_protocol() {
     hint " 未识别，请重输（可选：$PROTO_LETTERS）"
   done
 
+  local _port _sug _o _x
   for _l in $_letters; do
-    add_one "$_l" || continue
-    _cnt=$((_cnt + 1))
+    if [ "$_dual" = 'yes' ]; then
+      # 双栈：只问一次端口，两侧复用；推荐值需在两侧都空闲
+      _o=$(conf_get "$(item_key 6 "$_l" PORT)")
+      if [ -n "$_o" ] && [ "$_o" = "$(conf_get "$(item_key 4 "$_l" PORT)")" ]; then
+        _sug="$_o"
+      else
+        _sug=$(suggest_port_dual)
+      fi
+      reading " $(proto_desc "$_l") 双栈端口（回车用推荐值）" _port "$_sug"
+      if ! [[ "$_port" =~ ^[0-9]+$ ]] || [ "$_port" -lt 1 ] || [ "$_port" -gt 65535 ]; then
+        warning " 端口无效：$_port，已跳过 $(proto_desc "$_l")。"; continue
+      fi
+      # 两侧都先查冲突，避免只加了一半
+      local _bad='no'
+      for _x in 6 4; do
+        _o=$(conf_get "$(item_key "$_x" "$_l" PORT)")
+        if [ "$_port" != "$_o" ] && is_port_conflict "$_port" "$_x"; then
+          warning " 端口 $_port 在 $(fam_label "$_x") 侧已被占用，已跳过 $(proto_desc "$_l")。"
+          _bad='yes'; break
+        fi
+      done
+      [ "$_bad" = 'yes' ] && continue
+      add_one 6 "$_l" "$_port" || continue
+      add_one 4 "$_l" "$_port" || continue
+      _cnt=$((_cnt + 1))
+    else
+      add_one "$_fam" "$_l" || continue
+      _cnt=$((_cnt + 1))
+    fi
   done
 
-  info " 正在应用（ArgoX 的 v4 侧不受影响）..."
+  info " 正在应用（ArgoX 的 v4 直连入站不受影响）..."
   sync_all
   echo ''
   show_links
@@ -1223,50 +1390,67 @@ add_protocol() {
 delete_protocol() {
   local _it _any='no'
   echo ''
-  info "=========== 已配置的 IPv6 协议 ==========="
+  info "=========== 已配置的节点 ==========="
   while IFS= read -r _it; do
     [ -z "$_it" ] && continue
     set -- $_it
-    hint " $_2 = $(proto_desc "$2")   端口 $3"
+    hint " $(fam_label "$1")  |  $2 = $(proto_desc "$2")   端口 $3"
     _any='yes'
   done <<< "$(list_items)"
   [ "$_any" = 'no' ] && { hint " 尚未配置。"; return 0; }
 
-  local _l _port
+  local _fs _l _fams _x _port _found _a _tag
+  reading " 要删除的栈（4 / 6 / b=两栈一起删）" _fs
   reading " 要删除的协议字母" _l
   _l=$(parse_letters "$_l")
   [ -n "$_l" ] || error " 无效字母。"
   _l=${_l%% *}
+  case "$_fs" in 4|6) _fams="$_fs" ;; b|B) _fams='6 4' ;; *) error " 栈只能是 4 / 6 / b。" ;; esac
 
-  _port=$(conf_get "$(item_key 6 "$_l" PORT)")
-  [ -n "$_port" ] || error " 未找到该协议。"
+  _found='no'
+  for _x in $_fams; do
+    [ -n "$(conf_get "$(item_key "$_x" "$_l" PORT)")" ] && _found='yes'
+  done
+  [ "$_found" = 'yes' ] || error " 未找到：$_fs 侧的 $(proto_desc "$_l")。"
 
-  # 先把它从运行中的 xray 摘掉
-  local _a _tag _lf="$WORK_DIR/.v6live.$$"
   _a=$(api_addr) || true
-  if [ -n "$_a" ] && [ -x "$XRAY" ]; then
-    _tag=$(item_tag "$_l")
-    "$XRAY" api rmi --server="$_a" "$_tag" >/dev/null 2>&1
-  fi
+  for _x in $_fams; do
+    _port=$(conf_get "$(item_key "$_x" "$_l" PORT)")
+    [ -n "$_port" ] || continue
+    # 先从运行中的 xray 摘掉，再删配置
+    if [ -n "$_a" ] && [ -x "$XRAY" ]; then
+      _tag=$(item_tag "$_x" "$_l")
+      "$XRAY" api rmi --server="$_a" "$_tag" >/dev/null 2>&1
+    fi
+    del_conf_prefix "ITEM_${_x}_${_l}_"
+    fw_deny "$_x" "$_l" "$_port"
+    info " 已删除 $(fam_label "$_x") 侧 $(proto_desc "$_l")（端口 $_port）。"
+  done
 
-  del_conf_prefix "ITEM_6_${_l}_"
-  fw_deny "$_l" "$_port"
   rebuild_json
-
   # 重挂剩下的
   if [ -x "$HOOK" ]; then "$HOOK" post >/dev/null 2>&1; fi
-  info " 已删除 $(proto_desc "$_l")（端口 $_port）。"
 }
 
 refresh_addr() {
   echo ''
-  info " 正在重新探测 IPv6 地址 ..."
+  info " 正在重新探测公网地址 ..."
+  local _changed='no'
   if detect_v6; then
     info " IPv6 地址已更新为：$V6_BIND"
-    rebuild_json
-    sync_all
+    _changed='yes'
   else
     info " IPv6 地址未变化：${V6_BIND:-未检测到}"
+  fi
+  if detect_v4; then
+    info " IPv4 公网地址已更新为：$V4_PUB"
+    _changed='yes'
+  else
+    info " IPv4 公网地址：${V4_PUB:-未检测到}"
+  fi
+  if [ "$_changed" = 'yes' ]; then
+    rebuild_json
+    sync_all
   fi
 }
 
@@ -1287,6 +1471,7 @@ status() {
   fi
   plain " IPv6 绑定    : ${V6_BIND:-未检测到}"
   plain " IPv6 公网    : ${V6_PUB:-同绑定地址}"
+  plain " IPv4 公网    : ${V4_PUB:-未检测到}"
   plain " 开机守护     : $(hooks_installed && echo '已安装' || echo '未安装')"
   plain " 监听 API     : $(api_addr 2>/dev/null || echo '未找到')"
   echo ''
@@ -1300,10 +1485,12 @@ status() {
     while IFS= read -r _it; do
       [ -z "$_it" ] && continue
       set -- $_it
-      if grep -qxF "$(item_tag "$2")" "$_lf" 2>/dev/null; then
-        plain "   $3 | $V6_BIND | $(proto_desc "$2")  ✓ 运行中"
+      local _ls="$V6_BIND"
+      [ "$1" = '4' ] && _ls='0.0.0.0'
+      if grep -qxF "$(item_tag "$1" "$2")" "$_lf" 2>/dev/null; then
+        plain "   $3 | $_ls | $(fam_label "$1") | $(proto_desc "$2")  ✓ 运行中"
       else
-        plain "   $3 | $V6_BIND | $(proto_desc "$2")  ✗ 未挂载"
+        plain "   $3 | $_ls | $(fam_label "$1") | $(proto_desc "$2")  ✗ 未挂载"
       fi
     done <<< "$(list_items)"
     rm -f "$_lf"
@@ -1361,9 +1548,9 @@ manage_v4() {
 uninstall_all() {
   echo ''
   warning " 即将卸载 argoxv6（只删它自己加的东西）："
-  plain "   · 摘掉所有 IPv6 入站"
+  plain "   · 摘掉所有 argoxv6 入站（IPv4 + IPv6）"
   plain "   · 移除开机守护（systemd drop-in / OpenRC 服务）"
-  plain "   · 关闭它为 v6 放行的防火墙端口"
+  plain "   · 关闭它为两栈放行的防火墙端口"
   plain "   · 可选：把 ArgoX 还原为原生双栈监听"
   echo ''
   local _ok
@@ -1377,7 +1564,7 @@ uninstall_all() {
     while IFS= read -r _it; do
       [ -z "$_it" ] && continue
       set -- $_it
-      "$XRAY" api rmi --server="$_a" "$(item_tag "$2")" >/dev/null 2>&1
+      "$XRAY" api rmi --server="$_a" "$(item_tag "$1" "$2")" >/dev/null 2>&1
     done <<< "$(list_items)"
     # 顺手清理历史残留
     local _lf="$WORK_DIR/.un.$$"
@@ -1393,7 +1580,7 @@ uninstall_all() {
   while IFS= read -r _it; do
     [ -z "$_it" ] && continue
     set -- $_it
-    fw_deny "$2" "$3"
+    fw_deny "$1" "$2" "$3"
   done <<< "$(list_items)"
 
   # 3) 开机守护
@@ -1435,24 +1622,26 @@ menu() {
     echo " -----------------------------------------------------"
     hint " 1. 管理 IPv4 节点（调用 ArgoX 主脚本）"
     hint " 2. 为 IPv6 添加 / 更换协议"
-    hint " 3. 查看 IPv6 节点链接"
-    hint " 4. 删除某个 IPv6 协议"
-    hint " 5. 一键同步 / 自检修复"
-    hint " 6. 重新探测 IPv6 地址"
-    hint " 7. 查看当前状态"
-    hint " 8. 卸载 argoxv6"
+    hint " 3. 双栈添加：同一协议同时出 IPv4 + IPv6 节点"
+    hint " 4. 查看节点链接（IPv4 + IPv6，含 Base64 订阅）"
+    hint " 5. 删除某个协议（栈可选 4 / 6 / b）"
+    hint " 6. 一键同步 / 自检修复"
+    hint " 7. 重新探测 IPv6 地址"
+    hint " 8. 查看当前状态"
+    hint " 9. 卸载 argoxv6"
     hint " 0. 退出"
     local _c
     reading " 请选择" _c
     case "$_c" in
       1) manage_v4 ;;
-      2) add_protocol ;;
-      3) show_links ;;
-      4) delete_protocol ;;
-      5) sync_all ;;
-      6) refresh_addr ;;
-      7) status ;;
-      8) uninstall_all; return 0 ;;
+      2) add_protocol 6 ;;
+      3) add_protocol b ;;
+      4) show_links ;;
+      5) delete_protocol ;;
+      6) sync_all ;;
+      7) refresh_addr ;;
+      8) status ;;
+      9) uninstall_all; return 0 ;;
       0) exit 0 ;;
       *) hint " 无效选项。" ;;
     esac
@@ -1464,13 +1653,13 @@ main() {
   while [ $# -gt 0 ]; do
     case "$1" in
       -6) _manual_v6="${2:-}"; shift 2 ;;
-      -l|-s|-u|-v|-h|--help) break ;;
+      -l|-s|-u|-b|-v|-h|--help) break ;;
       *) shift ;;
     esac
   done
 
   case "${1:-}" in
-    -v) echo 'argoxv6 v2.0.0'; exit 0 ;;
+    -v) echo 'argoxv6 v2.1.0'; exit 0 ;;
   esac
 
   load_argox
@@ -1487,11 +1676,13 @@ main() {
     write_conf 'V6_PUB' "$V6_PUB"
   fi
   [ -n "$V6_BIND" ] || warning " 未检测到公网 IPv6，v6 侧将不可用。"
+  detect_v4 >/dev/null 2>&1 || true
 
   case "${1:-}" in
     -l) show_links ;;
     -s) sync_all ;;
     -u) uninstall_all ;;
+    -b) add_protocol b ;;
     -h|--help)
       sed -n '2,60p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
       ;;
