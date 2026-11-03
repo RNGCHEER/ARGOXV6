@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================
 # argoxv6.sh — ArgoX 辅助脚本：IPv4 / IPv6 分栈代理协议管理
-# 版本：v1.0.1 (2026.10.31)
+# 版本：v1.1.0 (2026.11.03)
 # 项目主页：https://github.com/RNGCHEER/ARGOXV6
 # 许可证：GPL-3.0（与上游 ArgoX 相同）
 #
@@ -22,8 +22,9 @@
 # 用法：
 #   bash argoxv6.sh          # 交互菜单
 #   bash argoxv6.sh -r      # 仅修复 Xray 服务集成（ArgoX 升级/重装后）
-#   bash argoxv6.sh -l      # 仅显示节点链接
+#   bash argoxv6.sh -l      # 仅显示节点链接（含全部节点 Base64 订阅）
 #   bash argoxv6.sh -u      # 卸载 argoxv6（还原服务、删除配置、关防火墙）
+#   bash argoxv6.sh -b      # 直接进入双栈添加（同一协议同时输出 IPv4+IPv6 节点）
 #
 # 测试环境变量（一般用户无需理会）：
 #   ARGOX_DIR=...           覆盖 ArgoX 工作目录（默认 /etc/argox）
@@ -63,13 +64,15 @@ info()    { echo -e "\033[32m\033[01m$*\033[0m"; }
 hint()    { echo -e "\033[33m\033[01m$*\033[0m"; }
 
 # reading "提示语" 变量名 [默认值]
+# reading "提示语" 变量名 [默认值]
+# 注意：内部变量刻意用 _rp/_rv/_rd 命名，避免与调用方传入的变量名冲突
 reading() {
-  local _p="$1" _v="$2" _d="${3:-}"
-  if [ -n "$_d" ]; then
-    read -r -p "$(echo -e "$_p [$_d]: ")" "$_v" || true
-    [ -z "${!_v}" ] && eval "$_v='$_d'"
+  local _rp="$1" _rv="$2" _rd="${3:-}"
+  if [ -n "$_rd" ]; then
+    read -r -p "$(echo -e "$_rp [$_rd]: ")" "$_rv" || true
+    [ -z "${!_rv}" ] && eval "$_rv='$_rd'"
   else
-    read -r -p "$(echo -e "$_p ")" "$_v" || exit 0
+    read -r -p "$(echo -e "$_rp ")" "$_rv" || exit 0
   fi
 }
 
@@ -178,6 +181,7 @@ load_argox() {
   load_conf
 
   # 节点名称：沿用 ArgoX 习惯（主机名）
+  NODE_NAME="${NODE_NAME#argoxv6-}"
   [ -z "$NODE_NAME" ] && NODE_NAME=$(hostname 2>/dev/null || echo 'ArgoX')
   NODE_NAME="argoxv6-${NODE_NAME// /-}"
 
@@ -253,6 +257,13 @@ is_port_conflict() {   # $1=port $2=fam
 suggest_port() {   # $1=fam
   local _p=35000
   while is_port_conflict "$_p" "$1"; do _p=$((_p + 1)); done
+  echo "$_p"
+}
+
+# 双栈模式：找一个在 IPv6 与 IPv4 两侧都空闲的端口
+suggest_port_dual() {
+  local _p=35000
+  while is_port_conflict "$_p" 6 || is_port_conflict "$_p" 4; do _p=$((_p + 1)); done
   echo "$_p"
 }
 
@@ -628,7 +639,7 @@ build_link() {
 }
 
 show_links() {
-  local _it _f _l _port _uuid _pass _link _any=false _fam_lines
+  local _it _f _l _port _uuid _pass _link _any=false _fam_lines _all=''
   for _f in 6 4; do
     _fam_lines=''
     while read -r _it; do
@@ -640,6 +651,7 @@ show_links() {
       _pass=$(conf_get "$(item_key "$_f" "$_l" PASS)")
       _link=$(build_link "$_f" "$_l" "$_port" "$_uuid" "$_pass")
       _fam_lines+="$(eval echo \$PROTO_DESC_$_l) [端口 $_port]\n$_link\n\n"
+      _all+="$_link"$'\n'
       _any=true
     done < <(list_items)
     if [ -n "$_fam_lines" ]; then
@@ -648,28 +660,40 @@ show_links() {
       echo -e "$_fam_lines"
     fi
   done
-  $_any || hint " 尚未配置任何 argoxv6 节点，请先在菜单中添加。"
+  $_any || { hint " 尚未配置任何 argoxv6 节点，请先在菜单中添加。"; return 0; }
+
+  # 全部节点（含 IPv4 + IPv6）合成一份 Base64 订阅，便于客户端一次导入
+  local _blob
+  _blob=$(printf '%s' "$_all" | base64 -w0 2>/dev/null || printf '%s' "$_all" | base64)
+  echo ''
+  info "================ 全部节点 Base64 订阅（同时含 IPv4 + IPv6） ================"
+  echo "$_blob"
+  echo ''
+  hint " 可将上面整串 Base64 粘贴为订阅内容导入（Clash / v2rayN / Shadowrocket 等）。"
 }
 
 # ---------------- 交互流程 ----------------
 # add_one_protocol FAM LETTER：配置单个协议（写 conf、放行防火墙、生成链接）
 # 不做 rebuild / patch / restart，由 add_protocol 批量完成后统一执行一次
-add_one_protocol() {   # $1=fam $2=letter
-  local _f="$1" _l="$2" _addr _old_port _port _sug _uuid _pass=''
+add_one_protocol() {   # $1=fam $2=letter [$3=port，双栈模式由调用方给定]
+  local _f="$1" _l="$2" _addr _old_port _port="${3:-}" _sug _uuid _pass=''
   _addr=$(fam_addr "$_f")
 
-  # 同栈已有该协议 -> 提示覆盖
   _old_port=$(conf_get "$(item_key "$_f" "$_l" PORT)")
-  if [ -n "$_old_port" ]; then
-    hint " $(fam_name "$_f") 侧已存在 $(eval echo \$PROTO_DESC_$_l)（端口 $_old_port），将覆盖。"
+  if [ -z "$_port" ]; then
+    # 同栈已有该协议 -> 提示覆盖
+    if [ -n "$_old_port" ]; then
+      hint " $(fam_name "$_f") 侧已存在 $(eval echo \$PROTO_DESC_$_l)（端口 $_old_port），将覆盖。"
+    fi
+    _sug=$(suggest_port "$_f")
+    [ -n "$_old_port" ] && _sug="$_old_port"
+    reading " 请输入 $(eval echo \$PROTO_DESC_$_l) 的端口（直接回车使用推荐值）" _port "$_sug"
+  elif [ -n "$_old_port" ] && [ "$_old_port" != "$_port" ]; then
+    hint " $(fam_name "$_f") 侧已存在 $(eval echo \$PROTO_DESC_$_l)（原端口 $_old_port），将改为 $_port。"
   fi
-
-  _sug=$(suggest_port "$_f")
-  [ -n "$_old_port" ] && _sug="$_old_port"
-  reading " 请输入 $(eval echo \$PROTO_DESC_$_l) 的端口（直接回车使用推荐值）" _port "$_sug"
   [[ "$_port" =~ ^[0-9]+$ ]] && [ "$_port" -ge 100 ] && [ "$_port" -le 65535 ] || error " 端口无效：$_port"
   if is_port_conflict "$_port" "$_f" && [ "$_port" != "$_old_port" ]; then
-    error " 端口 $_port 已被占用（ArgoX 或本机其他服务）。"
+    error " 端口 $_port 在 $(fam_name "$_f") 侧已被占用（ArgoX 或本机其他服务）。"
   fi
 
   _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
@@ -699,18 +723,31 @@ add_one_protocol() {   # $1=fam $2=letter
   echo " $ADD_LINK"
 }
 
-add_protocol() {   # $1=fam
-  local _f="$1" _addr
-  _addr=$(fam_addr "$_f")
-  [ -z "$_addr" ] && error " 未检测到本机 $(fam_name "$_f") 公网地址，无法为 $(fam_name "$_f") 设备单独设置协议。"
+add_protocol() {   # $1=fam: 4 | 6 | b（b = 双栈，同一协议同时绑 IPv4+IPv6）
+  local _f="$1" _dual=false _fams _label _x
+  if [ "$_f" = 'b' ]; then
+    _dual=true; _fams='6 4'; _label='双栈（IPv4 + IPv6）'
+  else
+    _fams="$_f"; _label="$(fam_name "$_f") 设备"
+  fi
+
+  # 参与本次添加的每一侧都必须有公网地址
+  for _x in $_fams; do
+    [ -n "$(fam_addr "$_x")" ] || error " 未检测到本机 $(fam_name "$_x") 公网地址，无法为 $(fam_name "$_x") 设备设置协议。"
+  done
 
   echo ''
-  info "=========== 为 $(fam_name "$_f") 设备添加代理协议（绑定监听：$_addr） ==========="
+  if $_dual; then
+    info "=========== 为双栈设备添加代理协议（IPv6=$WAN6 / IPv4=$WAN4） ==========="
+  else
+    info "=========== 为 $_label 添加代理协议（绑定监听：$(fam_addr "$_f")） ==========="
+  fi
   local _l
   for _l in $PROTO_LETTERS; do
     hint " $_l. $(eval echo \$PROTO_DESC_$_l)"
   done
   hint " 支持一次输入多个字母批量添加（如 bcdlm），a 或回车 = 全部添加"
+  $_dual && hint " 双栈模式：同一端口同时绑定 IPv6 与 IPv4 地址，两个节点链接一起输出"
 
   # 按 ArgoX 的解析习惯：多字母批量、逐字符过滤合法字母、去重保序、a/空 = 全部
   local _sel _letters
@@ -724,7 +761,24 @@ add_protocol() {   # $1=fam
   local _cnt=0
   for _l in $_letters; do
     ADD_LINK=''
-    add_one_protocol "$_f" "$_l"
+    if $_dual; then
+      local _dport _sug _o6 _o4 _o
+      _o6=$(conf_get "$(item_key 6 "$_l" PORT)")
+      _o4=$(conf_get "$(item_key 4 "$_l" PORT)")
+      if [ -n "$_o6" ] && [ "$_o6" = "$_o4" ]; then _sug="$_o6"; else _sug=$(suggest_port_dual); fi
+      reading " 请输入 $(eval echo \$PROTO_DESC_$_l) 的双栈端口（直接回车使用推荐值）" _dport "$_sug"
+      [[ "$_dport" =~ ^[0-9]+$ ]] && [ "$_dport" -ge 100 ] && [ "$_dport" -le 65535 ] || error " 端口无效：$_dport"
+      for _x in $_fams; do
+        if is_port_conflict "$_dport" "$_x"; then
+          _o=$(conf_get "$(item_key "$_x" "$_l" PORT)")
+          [ "$_dport" = "$_o" ] || error " 端口 $_dport 在 $(fam_name "$_x") 侧已被占用（ArgoX 或本机其他服务）。"
+        fi
+      done
+      # 先 IPv6 后 IPv4，同一端口：两个 socket 绑不同地址，互不冲突
+      for _x in $_fams; do add_one_protocol "$_x" "$_l" "$_dport"; done
+    else
+      add_one_protocol "$_f" "$_l"
+    fi
     _cnt=$((_cnt + 1))
   done
 
@@ -747,18 +801,26 @@ delete_protocol() {
   done < <(list_items)
   $_any || { hint " 尚未配置任何协议。"; return 0; }
 
-  local _f _l
-  reading " 请输入要删除的栈（4 或 6）" _f
+  local _f _l _fams _x _port _found=false
+  reading " 请输入要删除的栈（4 / 6 / b=双栈一起删除）" _f
   reading " 请输入要删除的协议字母" _l
-  local _port
-  _port=$(conf_get "$(item_key "$_f" "$_l" PORT)")
-  [ -z "$_port" ] && error " 未找到：$(fam_name "$_f") 侧协议 $_l"
+  if [ "$_f" = 'b' ]; then _fams='6 4'; else _fams="$_f"; fi
 
-  del_conf_prefix "ITEM_${_f}_${_l}_"
+  for _x in $_fams; do
+    _port=$(conf_get "$(item_key "$_x" "$_l" PORT)")
+    [ -n "$_port" ] && _found=true
+  done
+  $_found || error " 未找到：$_f 侧协议 $_l（栈可选 4 / 6 / b）"
+
+  for _x in $_fams; do
+    _port=$(conf_get "$(item_key "$_x" "$_l" PORT)")
+    [ -z "$_port" ] && continue
+    del_conf_prefix "ITEM_${_x}_${_l}_"
+    fw_deny "$_x" "$_l" "$_port"
+    info " 已删除 $(fam_name "$_x") 侧 $(eval echo \$PROTO_DESC_$_l)（端口 $_port）。"
+  done
   rebuild_json
-  fw_deny "$_f" "$_l" "$_port"
   restart_xray
-  info " 已删除 $(fam_name "$_f") 侧 $(eval echo \$PROTO_DESC_$_l)（端口 $_port）。"
 }
 
 update_addr() {
@@ -798,22 +860,24 @@ menu() {
     hint " 本机 IPv4: ${WAN4:-无}    本机 IPv6: ${WAN6:-无}"
     hint " 1. 为 IPv6 设备添加/更换代理协议"
     hint " 2. 为 IPv4 设备添加/更换代理协议"
-    hint " 3. 查看节点链接（分栈输出）"
-    hint " 4. 删除某个协议"
-    hint " 5. 重新检测公网 IP 并更新监听地址"
-    hint " 6. 修复 Xray 服务集成（ArgoX 升级/重装后执行）"
-    hint " 7. 卸载 argoxv6"
+    hint " 3. 同时为 IPv4 + IPv6 添加/更换（双栈节点一起输出）"
+    hint " 4. 查看节点链接（分栈输出 + 全部节点 Base64 订阅）"
+    hint " 5. 删除某个协议（可 4 / 6 / b 双栈）"
+    hint " 6. 重新检测公网 IP 并更新监听地址"
+    hint " 7. 修复 Xray 服务集成（ArgoX 升级/重装后执行）"
+    hint " 8. 卸载 argoxv6"
     hint " 0. 退出"
     local _c
     reading " 请选择" _c
     case "$_c" in
       1) add_protocol 6 ;;
       2) add_protocol 4 ;;
-      3) show_links ;;
-      4) delete_protocol ;;
-      5) update_addr ;;
-      6) repair_integration ;;
-      7) uninstall_v6 ;;
+      3) add_protocol b ;;
+      4) show_links ;;
+      5) delete_protocol ;;
+      6) update_addr ;;
+      7) repair_integration ;;
+      8) uninstall_v6 ;;
       0) exit 0 ;;
       *) hint " 无效选项。" ;;
     esac
@@ -826,6 +890,7 @@ main() {
     -r) repair_integration ;;
     -l) show_links ;;
     -u) uninstall_v6 ;;
+    -b) detect_wan; add_protocol b ;;
     *)  detect_wan
         if [ -n "$WAN4" ] && [ -n "$WAN6" ]; then
           info " 检测到双栈公网地址：IPv4=$WAN4 / IPv6=$WAN6"

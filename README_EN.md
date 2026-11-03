@@ -25,6 +25,7 @@
 
 ## Updates
 
+- **v1.1.0 (2026.11.03)**: New **dual-stack add** — one action binds the same protocol to both the IPv4 and IPv6 address (they may share the same port), and **both node links are printed together**; "show node links" now also emits a **Base64 subscription containing all V4+V6 nodes** for one-shot client import; delete accepts `b` to remove both stacks at once; new `-b` flag jumps straight into dual-stack add; fixes a `reading` internal variable-name collision (dual-stack port default was ignored) and duplicated node-name prefixes.
 - **v1.0.1 (2026.10.31)**: Protocol letters now accept batch input (e.g. `bcdlm`, `a` or Enter = all), matching ArgoX's parsing habit; offer one-key ArgoX installation (runs ArgoX's official script) when ArgoX is not installed; fix a field-comparison bug in port-conflict detection (batch adds on one stack could get the same suggested port).
 - **v1.0.0 (2026.10.31)**: First release. Add independent proxy-protocol inbounds per stack (IPv4/IPv6); same port can carry different protocols on different stacks; reuses ArgoX's Reality key pair and self-signed certificate; per-stack firewall rules; Xray service integration and clean uninstall.
 
@@ -69,9 +70,15 @@ One command runs it interactively (same invocation style as ArgoX), no download 
 bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r
 ~~~
 
-On first run it auto-detects public IPv4/IPv6 addresses and shows the menu. Use menu 1 to add a protocol for IPv6 devices, menu 2 for IPv4 devices. If ArgoX is not installed yet, the script offers a one-key ArgoX installation (runs ArgoX's official installer) and then continues.
+On first run it auto-detects public IPv4/IPv6 addresses and shows the menu. Use menu 1 for IPv6 devices, menu 2 for IPv4 devices; to **get both V4 and V6 nodes from a single action, use menu 3 (dual-stack add)** — the protocol is bound to both the IPv6 and the IPv4 address (they may share one port; two sockets on different addresses do not conflict) and both links are printed. If ArgoX is not installed yet, the script offers a one-key ArgoX installation (runs ArgoX's official installer) and then continues.
 
 Protocol selection follows ArgoX's input habit: **you can enter multiple letters at once to add them in batch** (e.g. `bcdlm`), or `a` / plain Enter for all. Each port is confirmed in turn (Enter accepts the suggested value; suggestions avoid conflicts on the same stack), then the config is rebuilt and Xray restarted once.
+
+To jump straight into dual-stack add, run with `-b`:
+
+~~~bash
+bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -b
+~~~
 
 ---
 
@@ -83,11 +90,12 @@ Interactive menu:
 | --- | --- |
 | 1 | Add / replace proxy protocol for IPv6 devices |
 | 2 | Add / replace proxy protocol for IPv4 devices |
-| 3 | Show node links (grouped per stack) |
-| 4 | Delete a protocol |
-| 5 | Re-detect public IP and update listen addresses |
-| 6 | Repair Xray service integration (after ArgoX upgrade/reinstall) |
-| 7 | Uninstall argoxv6 |
+| 3 | **Add / replace for both IPv4 + IPv6 (dual-stack, nodes printed together)** |
+| 4 | Show node links (grouped per stack + all-node Base64 subscription) |
+| 5 | Delete a protocol (stack: 4 / 6 / b for both) |
+| 6 | Re-detect public IP and update listen addresses |
+| 7 | Repair Xray service integration (after ArgoX upgrade/reinstall) |
+| 8 | Uninstall argoxv6 |
 | 0 | Exit |
 
 Command line flags:
@@ -95,8 +103,9 @@ Command line flags:
 | Flag | Function |
 | --- | --- |
 | -r | Only repair Xray service integration |
-| -l | Only show node links |
+| -l | Only show node links (includes all-node Base64 subscription) |
 | -u | Uninstall argoxv6 |
+| -b | Jump straight into dual-stack add (prints IPv4 + IPv6 nodes together) |
 
 ---
 
@@ -121,7 +130,7 @@ Protocol letters follow ArgoX's naming:
 2. **Per-stack listen binding**: the listen field of new inbounds is set to a concrete IPv6 or IPv4 public address, so it only serves that stack. The same port on two stacks binds different addresses — the sockets do not conflict.
 3. **Reuses ArgoX assets**: Reality reuses ArgoX's privateKey / publicKey / serverNames; TLS reuses or generates a self-signed certificate (/etc/argox/cert).
 4. **Per-stack firewall**: ufw / firewalld / iptables + ip6tables open the matching port per stack; iptables rules carry ArgoxV6 comment marks and persist via ArgoX's rules.v4 / rules.v6.
-5. **Service integration**: appends -c argoxv6.json to xray.service's ExecStart (or OpenRC command_args); run menu 6 after an ArgoX upgrade to repair.
+5. **Service integration**: appends -c argoxv6.json to xray.service's ExecStart (or OpenRC command_args); run menu 7 after an ArgoX upgrade to repair.
 
 ---
 
@@ -139,7 +148,7 @@ Protocol letters follow ArgoX's naming:
 ## FAQ
 
 **After upgrading/reinstalling ArgoX, argoxv6 nodes stopped working?**
-Run bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r or menu 6 to re-integrate argoxv6.json into the Xray service.
+Run bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r or menu 7 to re-integrate argoxv6.json into the Xray service.
 
 **Can IPv4 and IPv6 use the same port with different protocols?**
 Yes. argoxv6 binds the v6 inbound to a specific IPv6 address and the v4 inbound to a specific IPv4 address; the two sockets do not conflict.

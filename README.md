@@ -25,6 +25,7 @@
 
 ## 更新信息
 
+- **v1.1.0 (2026.11.03)**：新增**双栈添加**——一条动作把同一协议同时绑到 IPv4 与 IPv6 地址（可复用同一端口），**两个节点链接一起输出**；菜单「查看节点链接」额外给出**含全部 V4+V6 节点的 Base64 订阅**，可整串导入客户端；删除协议支持 `b` 一次性删除双栈；新增 `-b` 参数直接进入双栈添加；修复 `reading` 内部变量名冲突（双栈端口默认值失效）、节点名重复叠加前缀的问题。
 - **v1.0.1 (2026.10.31)**：协议字母支持一次输入多个批量添加（如 `bcdlm`，`a` 或回车 = 全部），与 ArgoX 的解析习惯一致；未安装 ArgoX 时可选一键安装（调用 ArgoX 官方脚本）；修复端口冲突检测的字段比较错误（同栈批量添加会重复推荐同一端口）。
 - **v1.0.0 (2026.10.31)**：首个版本。支持为 IPv4 / IPv6 分栈添加独立代理协议入站；同端口可按栈区分协议；复用 ArgoX 的 Reality 密钥对与自签证书；分栈防火墙放行；Xray 服务集成与卸载还原。
 
@@ -69,9 +70,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv
 bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r
 ~~~
 
-首次进入会自动探测公网 IPv4 / IPv6 地址，然后进入菜单。为 IPv6 设备添加协议只需选菜单 1，为 IPv4 设备添加协议选菜单 2。如果服务器还没有安装 ArgoX，脚本会提示并可一键安装 ArgoX（调用 ArgoX 官方安装脚本）后继续。
+首次进入会自动探测公网 IPv4 / IPv6 地址，然后进入菜单。为 IPv6 设备添加协议选菜单 1，为 IPv4 设备添加协议选菜单 2；**想一条动作同时输出 V4 和 V6 节点，选菜单 3（双栈添加）**——同一协议会同时绑到 IPv6 与 IPv4 地址（可复用同一端口，两个 socket 绑不同地址互不冲突），两个节点链接一起打印。如果服务器还没有安装 ArgoX，脚本会提示并可一键安装 ArgoX（调用 ArgoX 官方安装脚本）后继续。
 
 选择协议时与 ArgoX 的输入习惯一致：**支持一次输入多个字母批量添加**（如 `bcdlm`），`a` 或直接回车 = 全部添加；逐个确认端口（回车用推荐值，同栈自动错开）后一次性重建配置并重启 Xray。
+
+想直接跳到双栈添加，也可以带参数运行：
+
+~~~bash
+bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -b
+~~~
 
 ---
 
@@ -83,11 +90,12 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 | --- | --- |
 | 1 | 为 IPv6 设备添加 / 更换代理协议 |
 | 2 | 为 IPv4 设备添加 / 更换代理协议 |
-| 3 | 查看节点链接（分栈输出） |
-| 4 | 删除某个协议 |
-| 5 | 重新检测公网 IP 并更新监听地址 |
-| 6 | 修复 Xray 服务集成（ArgoX 升级 / 重装后执行） |
-| 7 | 卸载 argoxv6 |
+| 3 | **同时为 IPv4 + IPv6 添加 / 更换（双栈，节点一起输出）** |
+| 4 | 查看节点链接（分栈输出 + 全部节点 Base64 订阅） |
+| 5 | 删除某个协议（栈可选 4 / 6 / b 双栈） |
+| 6 | 重新检测公网 IP 并更新监听地址 |
+| 7 | 修复 Xray 服务集成（ArgoX 升级 / 重装后执行） |
+| 8 | 卸载 argoxv6 |
 | 0 | 退出 |
 
 命令行参数：
@@ -95,8 +103,9 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 | 参数 | 功能 |
 | --- | --- |
 | -r | 仅修复 Xray 服务集成 |
-| -l | 仅显示节点链接 |
+| -l | 仅显示节点链接（含全部节点 Base64 订阅） |
 | -u | 卸载 argoxv6 |
+| -b | 直接进入双栈添加（同一协议同时输出 IPv4 + IPv6 节点） |
 
 ---
 
@@ -121,7 +130,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 2. **按栈绑定监听**：新增入站的 listen 字段被设为具体的 IPv6 或 IPv4 公网地址，从而只在该栈上监听。同一端口在两个栈上各自绑定不同地址，socket 不冲突。
 3. **复用 ArgoX 资产**：Reality 协议自动复用 ArgoX 的 privateKey / publicKey / serverNames；TLS 协议复用或生成自签证书（/etc/argox/cert）。
 4. **分栈防火墙**：ufw / firewalld / iptables + ip6tables 按栈放行对应端口，iptables 规则带 ArgoxV6 注释标记，持久化复用 ArgoX 的 rules.v4 / rules.v6。
-5. **服务集成**：给 xray.service 的 ExecStart（或 OpenRC command_args）追加 -c argoxv6.json；ArgoX 升级重装后用菜单 6 一键修复。
+5. **服务集成**：给 xray.service 的 ExecStart（或 OpenRC command_args）追加 -c argoxv6.json；ArgoX 升级重装后用菜单 7 一键修复。
 
 ---
 
@@ -139,7 +148,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 ## 常见问题
 
 **Q：ArgoX 升级 / 重装后 argoxv6 节点失效？**
-执行 bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r 或菜单 6，重新把 argoxv6.json 集成进 Xray 服务。
+执行 bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh) -r 或菜单 7，重新把 argoxv6.json 集成进 Xray 服务。
 
 **Q：能否为 IPv4 和 IPv6 用同一个端口但不同协议？**
 可以。argoxv6 会把 v6 入站绑到具体 IPv6 地址、v4 入站绑到具体 IPv4 地址，两个 socket 互不冲突。

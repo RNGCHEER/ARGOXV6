@@ -146,7 +146,7 @@ MOCKEOF
 chmod +x "$T/bin/"*
 
 echo '=================== SESSION 1: 添加 v6-b / v4-c，看链接 ==================='
-printf '1\nb\n\n3\n2\nc\n\n3\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
+printf '1\nb\n\n4\n2\nc\n\n4\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
 
 echo ''
 echo '=================== SESSION 1 后的状态 ==================='
@@ -165,11 +165,21 @@ ls -la "$A/cert" 2>/dev/null || echo '(未生成)'
 
 echo ''
 echo '=================== SESSION 2: 多字母批量添加 v4-d/v4-m ==================='
-printf '2\ndm\n\n\n3\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
+printf '2\ndm\n\n\n4\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
 
 echo ''
 echo '=================== SESSION 2 后: v4 入站清单 ==================='
 jq '[.inbounds[] | select(.listen != "127.0.0.1") | {tag, listen, port, protocol}]' "$A/argoxv6.json"
+
+echo ''
+echo '=================== SESSION 2b: 双栈添加 b/m（同一端口同时出 V4+V6 节点） ==================='
+printf '3\nbm\n\n\n4\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1 | grep -E '双栈|已添加|共添加|Base64|vless://|ss://|hysteria2://|trojan://|无效|已被占用|未找到'
+echo '--- 双栈端口核对（同一协议 IPv6/IPv4 同端口） ---'
+jq -r '.inbounds[] | "\(.listen)\t\(.port)\t\(.tag)"' "$A/argoxv6.json"
+
+echo ''
+echo '=================== SESSION 2c: -b 参数直接双栈添加（CLI） ==================='
+printf 'l\n\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" -b 2>&1 | grep -E '双栈|已添加|共添加'
 
 echo ''
 echo '=================== SESSION 3: 字母 a = 全部添加（v6） ==================='
@@ -188,7 +198,7 @@ ls "$T/noargox"
 
 echo ''
 echo '=================== SESSION 5: 删 v6-b，卸载 ==================='
-printf '4\n6\nb\n7\ny\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
+printf '5\n6\nb\n8\ny\n0\n' | env PATH="$T/bin:$PATH" ARGOX_DIR="$A" XRAY_DAEMON_FILE="$T/xray.service" bash "$T/argoxv6.sh" 2>&1
 
 echo ''
 echo '=================== SESSION 5 后的状态 ==================='
