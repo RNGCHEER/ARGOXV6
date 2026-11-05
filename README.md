@@ -2,14 +2,16 @@
 
 **ArgoX 只管 IPv4，argoxv6 只管 IPv6 —— 互不干扰的 ArgoX 双栈助手；也支持「双栈添加」一次同时输出 V4 + V6 节点**
 
+> **v2.1.3 修复**：删除节点不再问「栈 + 协议字母」——直接把已配置节点编号列出来，填序号即可（可一次多个，如 `1 3`；`a`=全部；`0`=取消）。字母填错就退出整个脚本的老毛病没有了：输入非法只重新询问，删前还有一次确认，删完回显剩余节点。
+>
 > **v2.1.2 修复**：IPv6 地址探测不再「抓到哪个算哪个」——按内核出站源地址 → 默认网卡公网 GUA → 全网卡兜底取地址，跳过隐私扩展的临时地址；节点链接的主机默认就用**你实际监听的地址**。并新增 `-d` 诊断（本机全部 IPv6 / 出站源地址 / 在线探测结果 / conf 值一次打全）。
 >
-> **v2.1.0 新增**：菜单 3 / `-b` 双栈添加（同一协议同时绑 IPv4 0.0.0.0 与 IPv6，可复用同一端口，两个节点链接一起出）；菜单 4 / `-l` 按栈同时列出 V4+V6 全部节点并附**含全部节点的 Base64 订阅**；删除支持 `4 / 6 / b`。
+> **v2.1.0 新增**：菜单 3 / `-b` 双栈添加（同一协议同时绑 IPv4 0.0.0.0 与 IPv6，可复用同一端口，两个节点链接一起出）；菜单 4 / `-l` 按栈同时列出 V4+V6 全部节点并附**含全部节点的 Base64 订阅**；删除按节点编号多选（`a`=全部，删前二次确认）。
 
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/基于-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/系统-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/版本-v2.1.2-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/版本-v2.1.3-brightgreen.svg)](#)
 
 > 这是 [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x 的重写版本。
 > 旧版会与 ArgoX 互相破坏（详见 [为什么旧版会把 ArgoX 搞坏](#为什么旧版会把-argox-搞坏)）；v2.0.0 从架构上彻底解耦：**任一侧出问题，另一侧照常运行**。
@@ -133,7 +135,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 | 2 | 为 IPv6 添加 / 更换协议 |
 | 3 | **双栈添加：同一协议同时出 IPv4 + IPv6 节点** |
 | 4 | **查看节点链接（IPv4 + IPv6，含 Base64 订阅）** |
-| 5 | 删除某个协议（栈可选 `4` / `6` / `b`） |
+| 5 | 删除节点（按编号选，可多选 `1 3`；`a`=全部；删前确认） |
 | 6 | 一键同步 / 自检修复 |
 | 7 | 重新探测 IPv6 地址 |
 | 8 | 查看当前状态（含每个入站是否真的挂载） |

@@ -5,14 +5,16 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/built%20on-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/version-v2.1.2-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/version-v2.1.3-brightgreen.svg)](#)
 
 > A rewrite of [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x.
 > The old version broke ArgoX (see [why the old version broke ArgoX](#why-the-old-version-broke-argox)); v2.0.0 decouples the two sides entirely — **if one side fails, the other keeps running**.
 >
+> **Fixed in v2.1.3**: deleting a node no longer asks for "stack + protocol letter" — configured nodes are listed with numbers, just type the number(s) (`1 3`, `a` = all, `0` = cancel). A typo no longer kills the whole script: invalid input re-prompts, there is a confirmation step, and the remaining nodes are echoed afterwards.
+>
 > **Fixed in v2.1.2**: IPv6 detection no longer takes "whatever it finds first" — it prefers the kernel's outbound source address, then a public GUA on the default interface, then any global address, skipping privacy-extension temporary addresses; the node link host now defaults to the address you actually listen on. New `-d` diagnostic (all local IPv6 addresses / outbound source / online probe result / conf values).
 >
-> **New in v2.1.0**: menu 3 / `-b` dual-stack add (one protocol bound to both IPv4 `0.0.0.0` and IPv6, may share the same port, both node links printed together); menu 4 / `-l` lists all IPv4 + IPv6 nodes per stack plus a **Base64 subscription containing every node**; delete accepts `4 / 6 / b`.
+> **New in v2.1.0**: menu 3 / `-b` dual-stack add (one protocol bound to both IPv4 `0.0.0.0` and IPv6, may share the same port, both node links printed together); menu 4 / `-l` lists all IPv4 + IPv6 nodes per stack plus a **Base64 subscription containing every node**; delete is a numbered multi-select (`a` = all, with confirmation).
 
 [中文](README.md) | English
 
@@ -132,7 +134,7 @@ The first run auto-detects public IPv4 / IPv6 (no public IPv6 → clear warning,
 | 2 | Add / replace IPv6 protocols |
 | 3 | **Dual-stack add: one protocol bound to both IPv4 + IPv6** |
 | 4 | **Show node links (IPv4 + IPv6, with Base64 subscription)** |
-| 5 | Delete a protocol (stack `4` / `6` / `b`) |
+| 5 | Delete nodes (pick by number, multi-select `1 3`; `a` = all; asks for confirmation) |
 | 6 | Sync / self-check & repair |
 | 7 | Re-detect IPv6 address |
 | 8 | Show status (including whether each inbound is actually mounted) |

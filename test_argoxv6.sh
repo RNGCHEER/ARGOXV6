@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# argoxv6.sh v2.1.2 在 WSL mock 环境下的集成测试
+# argoxv6.sh v2.1.3 在 WSL mock 环境下的集成测试
 set -u
 T=/tmp/argoxtest
 rm -rf "$T"
@@ -155,12 +155,20 @@ echo '=================== SESSION 4: 无 ArgoX（非交互）应明确报错 ===
 rm -rf "$T/noargox"
 printf '' | env PATH="$T/bin:$PATH" ARGOX_DIR="$T/noargox" SYSTEMD_DIR="$T/systemd" INITD_DIR="$T/initd" ARGOXV6_FLAG="$T/flag" bash "$T/argoxv6.sh" 2>&1 | head -5
 
-echo ''
-echo '=================== SESSION 5: 删除 b（双栈一起）+ 卸载 ==================='
-printf '5\nb\nb\n9\ny\n' | RUN 2>&1 | grep -E '已删除|卸载|未找到|残留'
+echo '=================== SESSION 5a: 删除前先列编号；非法输入只重问、取消不落地 ==================='
+printf '5\nx\n1\nn\n0\n' | RUN 2>&1 | grep -E '已配置的节点|[0-9]+\) |只能输入序号|将要删除|已取消|已删除'
+echo '--- conf 条目数（取消后应保持不变）---'
+grep -c '^ITEM_' "$A/argoxv6.conf"
 
 echo ''
-echo '=================== SESSION 5 后的状态 ==================='
+echo '=================== SESSION 5b: 按序号删 1 个（y 确认） ==================='
+printf '5\n1\ny\n0\n' | RUN 2>&1 | grep -E '已删除|剩余节点'
+echo '--- conf 条目数（应减 1 组）---'
+grep -c '^ITEM_' "$A/argoxv6.conf"
+
+echo ''
+echo '=================== SESSION 5c: a=全部删除 + 卸载 ==================='
+printf '5\na\ny\n9\ny\n' | RUN 2>&1 | grep -E '将要删除|已删除|没有 argoxv6 节点|卸载|残留'
 echo '--- argoxv6.json ---'
 cat "$A/argoxv6.json" 2>/dev/null || echo '(已删除)'
 echo '--- argoxv6.conf ---'

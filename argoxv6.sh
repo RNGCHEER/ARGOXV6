@@ -1,7 +1,13 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  argoxv6.sh  v2.1.2  (2026.11.05)
+#  argoxv6.sh  v2.1.3  (2026.11.05)
 #  ArgoX 双栈助手 —— ArgoX 管 IPv4，argoxv6 管 IPv6；并支持「双栈添加」一次输出两栈节点
+#
+#  【v2.1.3 修复：删除节点选不中】
+#    · 旧版删除要先填「栈」再填「协议字母」，字母填错/填了列表里没有的项就直接
+#      exit 1 退出整个脚本（菜单也没了），看着像"卡死、选不了"。
+#    · 现在直接把已配置节点编号列出来，填序号即可（可一次多个，如 1 3；a=全部），
+#      输入非法只重新询问、不再中断脚本，删前有二次确认，删完回显剩余节点。
 #
 #  【v2.1.2 修复：IPv6 地址探测】
 #    · 旧版按「默认路由网卡上的第一个 global 地址」取绑定地址，并直接把在线探测
@@ -17,7 +23,7 @@
 #      生成的 v4 入站同样走 Xray API 热挂载，ArgoX 完全不受影响。
 #    · 菜单 4 / -l：按栈分组同时列出 IPv4 + IPv6 全部节点，
 #      并附一份含全部节点的 Base64 订阅（可整串导入客户端）。
-#    · 删除支持 4 / 6 / b（b = 两栈一起删）。
+#    · 删除按「已配置节点」编号选择，可一次删多个 / a=全部，删前二次确认。
 # =============================================================================
 #
 #  【为什么旧版 argoxv6 会把 ArgoX 搞坏】
@@ -1595,48 +1601,91 @@ add_protocol() {   # $1=fam: 6（默认）| 4 | b（双栈：同一协议同时�
 }
 
 delete_protocol() {
-  local _it _any='no'
+  local _it _any='no' _n=0 _sel _p _ok _pick='' _targets='' _cnt=0
+  local _f _l _port _a _tag
+  local -a _mf=() _ml=()   # 序号 -> 栈 / 协议字母
   echo ''
   info "=========== 已配置的节点 ==========="
   while IFS= read -r _it; do
     [ -z "$_it" ] && continue
+    _n=$((_n + 1))
     set -- $_it
-    hint " $(fam_label "$1")  |  $2 = $(proto_desc "$2")   端口 $3"
+    hint " $_n) $(fam_label "$1")  |  $2 = $(proto_desc "$2")   端口 $3"
+    _mf[$_n]="$1"; _ml[$_n]="$2"
     _any='yes'
   done <<< "$(list_items)"
-  [ "$_any" = 'no' ] && { hint " 尚未配置。"; return 0; }
+  [ "$_any" = 'no' ] && { hint " 还没有配置任何节点，无需删除。"; return 0; }
 
-  local _fs _l _fams _x _port _found _a _tag
-  reading " 要删除的栈（4 / 6 / b=两栈一起删）" _fs
-  reading " 要删除的协议字母" _l
-  _l=$(parse_letters "$_l")
-  [ -n "$_l" ] || error " 无效字母。"
-  _l=${_l%% *}
-  case "$_fs" in 4|6) _fams="$_fs" ;; b|B) _fams='6 4' ;; *) error " 栈只能是 4 / 6 / b。" ;; esac
-
-  _found='no'
-  for _x in $_fams; do
-    [ -n "$(conf_get "$(item_key "$_x" "$_l" PORT)")" ] && _found='yes'
+  # 选序号：可一次多个 / a=全部 / 0=取消；输入非法只重新询问，不会中断脚本
+  while true; do
+    reading " 要删除的节点序号（可多个，如 1 3；a=全部；0=取消）" _sel
+    _sel=$(printf '%s' "${_sel:-}" | tr 'A-Z' 'a-z' | tr ',' ' ' | tr -s ' \t')
+    _sel=${_sel# }; _sel=${_sel% }
+    case "$_sel" in ''|0) hint " 已取消。"; return 0 ;; esac
+    _pick='' _ok='yes'
+    for _p in $_sel; do
+      case "$_p" in
+        a|all) _pick='ALL'; break ;;
+        *[!0-9]*) _ok='no'; warning " 只能输入序号数字（1-$_n）、a=全部 或 0=取消。"; break ;;
+      esac
+      _p=$((10#$_p))
+      [ "$_p" -ge 1 ] && [ "$_p" -le "$_n" ] || { _ok='no'; warning " 序号 $_p 超出范围（1-$_n）。"; break; }
+      case " $_pick " in *" $_p "*) : ;; *) _pick="$_pick $_p" ;; esac
+    done
+    [ "$_ok" = 'yes' ] && break
   done
-  [ "$_found" = 'yes' ] || error " 未找到：$_fs 侧的 $(proto_desc "$_l")。"
+
+  if [ "$_pick" = 'ALL' ]; then
+    _pick=''
+    _p=1
+    while [ "$_p" -le "$_n" ]; do _pick="$_pick $_p"; _p=$((_p + 1)); done
+  fi
+
+  for _p in $_pick; do
+    _targets="$_targets $_p"
+    _cnt=$((_cnt + 1))
+  done
+
+  echo ''
+  hint " 将要删除 $_cnt 个节点："
+  for _p in $_targets; do
+    hint "   - $(fam_label "${_mf[$_p]}")  ${_ml[$_p]} = $(proto_desc "${_ml[$_p]}")"
+  done
+  reading " 确认删除？(y/N)" _sel
+  case "$(printf '%s' "${_sel:-}" | tr 'A-Z' 'a-z')" in
+    y|yes) : ;;
+    *) hint " 已取消，未做任何修改。"; return 0 ;;
+  esac
 
   _a=$(api_addr) || true
-  for _x in $_fams; do
-    _port=$(conf_get "$(item_key "$_x" "$_l" PORT)")
+  for _p in $_targets; do
+    _f=${_mf[$_p]}; _l=${_ml[$_p]}
+    _port=$(conf_get "$(item_key "$_f" "$_l" PORT)")
     [ -n "$_port" ] || continue
     # 先从运行中的 xray 摘掉，再删配置
     if [ -n "$_a" ] && [ -x "$XRAY" ]; then
-      _tag=$(item_tag "$_x" "$_l")
+      _tag=$(item_tag "$_f" "$_l")
       "$XRAY" api rmi --server="$_a" "$_tag" >/dev/null 2>&1
     fi
-    del_conf_prefix "ITEM_${_x}_${_l}_"
-    fw_deny "$_x" "$_l" "$_port"
-    info " 已删除 $(fam_label "$_x") 侧 $(proto_desc "$_l")（端口 $_port）。"
+    del_conf_prefix "ITEM_${_f}_${_l}_"
+    fw_deny "$_f" "$_l" "$_port"
+    info " 已删除 $(fam_label "$_f") 侧 $(proto_desc "$_l")（端口 $_port）。"
   done
 
   rebuild_json
   # 重挂剩下的
   if [ -x "$HOOK" ]; then "$HOOK" post >/dev/null 2>&1; fi
+  echo ''
+  if [ -n "$(list_items)" ]; then
+    hint " 剩余节点："
+    while IFS= read -r _it; do
+      [ -z "$_it" ] && continue
+      set -- $_it
+      hint "   $(fam_label "$1")  |  $2 = $(proto_desc "$2")   端口 $3"
+    done <<< "$(list_items)"
+  else
+    hint " 已经没有 argoxv6 节点了。"
+  fi
 }
 
 refresh_addr() {
@@ -1842,7 +1891,7 @@ menu() {
     hint " 2. 为 IPv6 添加 / 更换协议"
     hint " 3. 双栈添加：同一协议同时出 IPv4 + IPv6 节点"
     hint " 4. 查看节点链接（IPv4 + IPv6，含 Base64 订阅）"
-    hint " 5. 删除某个协议（栈可选 4 / 6 / b）"
+    hint " 5. 删除节点（序号可选多个，a=全部）"
     hint " 6. 一键同步 / 自检修复"
     hint " 7. 重新探测 IPv6 地址"
     hint " 8. 查看当前状态"
@@ -1887,7 +1936,7 @@ main() {
   fi
 
   case "$_mode" in
-    -v) echo 'argoxv6 v2.1.2'; exit 0 ;;
+    -v) echo 'argoxv6 v2.1.3'; exit 0 ;;
   esac
 
   load_argox
