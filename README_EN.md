@@ -5,10 +5,12 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/built%20on-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/version-v2.1.1-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/version-v2.1.2-brightgreen.svg)](#)
 
 > A rewrite of [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x.
 > The old version broke ArgoX (see [why the old version broke ArgoX](#why-the-old-version-broke-argox)); v2.0.0 decouples the two sides entirely — **if one side fails, the other keeps running**.
+>
+> **Fixed in v2.1.2**: IPv6 detection no longer takes "whatever it finds first" — it prefers the kernel's outbound source address, then a public GUA on the default interface, then any global address, skipping privacy-extension temporary addresses; the node link host now defaults to the address you actually listen on. New `-d` diagnostic (all local IPv6 addresses / outbound source / online probe result / conf values).
 >
 > **New in v2.1.0**: menu 3 / `-b` dual-stack add (one protocol bound to both IPv4 `0.0.0.0` and IPv6, may share the same port, both node links printed together); menu 4 / `-l` lists all IPv4 + IPv6 nodes per stack plus a **Base64 subscription containing every node**; delete accepts `4 / 6 / b`.
 
@@ -154,7 +156,8 @@ bash argoxv6.sh -b              # jump straight into dual-stack add (IPv4 + IPv6
 bash argoxv6.sh -b -p 12300     # dual-stack add with a start port: 12300, 12301, 12302… in order
 bash argoxv6.sh -l              # print all IPv4 + IPv6 links (with Base64 subscription)
 bash argoxv6.sh -u              # uninstall
-bash argoxv6.sh -6 2001:db8::1  # force bind address (NAT66 / multi-address)
+bash argoxv6.sh -d              # diagnose IPv6 addresses (all local / outbound source / probe / conf)
+bash argoxv6.sh -6 2001:db8::1  # force IPv6 address (used for both listen and link; NAT66 / multi-address)
 bash argoxv6.sh -v              # version
 bash argoxv6.sh -h              # help (print script header)
 ```
@@ -208,11 +211,16 @@ For tests / special cases, override the default paths:
 ## FAQ
 
 **Do I need to repair after an ArgoX upgrade / reinstall?**
-No. The drop-in is a separate file; ArgoX rewriting `xray.service` doesn't remove it. In the extreme case (unit deleted and recreated), just run menu 5.
+No. The drop-in is a separate file; ArgoX rewriting `xray.service` doesn't remove it. In the extreme case (unit deleted and recreated), just run menu 6 (sync / self-repair).
 
 **Will IPv6 nodes drop when I change protocols in ArgoX?**
-ArgoX's hot reload only knows its own `inbound.json` tags and will remove v6 inbounds as a side effect. Use **menu 1** to enter ArgoX (it re-mounts on exit). If you ran `argox.sh` directly, run **menu 5** afterwards.
+ArgoX's hot reload only knows its own `inbound.json` tags and will remove v6 inbounds as a side effect. Use **menu 1** to enter ArgoX (it re-mounts on exit). If you ran `argox.sh` directly, run **menu 6** (sync) afterwards.
 
+**The IPv6 address in my node link is wrong (e.g. the box is `...::1015` but the link says `...::1`) / clients can't connect?**
+Run `bash argoxv6.sh -d` first:
+- "local global IPv6 addresses" lists every address on the NICs and flags temporary (privacy-extension) ones — they change over time and must not be used for bind;
+- "outbound source address" is the one the kernel actually uses to reach the internet — normally the address clients should connect to;
+- if "listen address / link address" are still not what you expect, force it with `-6 <address>` (changes listen and link together), then run `-s` once.
 **What if my VPS changes its IPv6 prefix?**
 Nothing to do. The hook re-detects the address on every Xray start and rewrites the config if it differs — one restart heals it.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# argoxv6.sh v2.1.0 在 WSL mock 环境下的集成测试
+# argoxv6.sh v2.1.2 在 WSL mock 环境下的集成测试
 set -u
 T=/tmp/argoxtest
 rm -rf "$T"
@@ -169,3 +169,49 @@ echo '--- ArgoX inbound.json 完好性 ---'
 jq -r '[.inbounds[].tag] | join(",")' "$A/inbound.json"
 echo '--- drop-in / hook 残留 ---'
 ls "$T/systemd" 2>/dev/null; ls "$A/argoxv6-hook.sh" 2>/dev/null || echo '(hook 已清理)'
+
+echo ''
+echo '=================== SESSION 6: IPv6 地址探测（多地址 / 临时地址 / 探测到别的地址） ==================='
+D6="$T/detect"; rm -rf "$D6"; mkdir -p "$D6/argox" "$D6/bin"
+cp "$A/inbound.json" "$A/outbound.json" "$A/custom" "$A/xray" "$D6/argox/"
+chmod +x "$D6/argox/xray"
+cat > "$D6/bin/ip" <<'IPEOF'
+#!/bin/sh
+case "$*" in
+  *"route get"*)
+    echo '2606:4700:4700::1111 via fe80::1 dev eth0 src 2001:df6:11c0:3e2a::1015 metric 0 uid 0'
+    echo '    cache expires in 597sec'
+    ;;
+  *"route show default"*) echo 'default via fe80::1 dev eth0 proto ra metric 600' ;;
+  *"addr show"*)
+    echo '1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 state UNKNOWN'
+    echo '    inet6 ::1/128 scope host'
+    echo '2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 state UP'
+    echo '    inet6 fd00:aaaa::1/64 scope global'
+    echo '    inet6 2001:df6:11c0:3e2a::1015/64 scope global'
+    echo '    inet6 2001:df6:11c0:3e2a:abcd::9/64 scope global temporary dynamic'
+    echo '    inet6 fe80::1/64 scope link'
+    ;;
+  *) echo '' ;;
+esac
+IPEOF
+chmod +x "$D6/bin/ip"
+cat > "$D6/bin/curl" <<'CEOF'
+#!/bin/sh
+for a in "$@"; do
+  case "$a" in *icanhazip*|*ident.me*|*cloudflare*) echo '2001:db8::dead:beef'; exit 0 ;; esac
+done
+exit 1
+CEOF
+chmod +x "$D6/bin/curl"
+D6RUN() { env PATH="$D6/bin:$T/bin:$PATH" ARGOX_DIR="$D6/argox" SYSTEMD_DIR="$T/systemd" INITD_DIR="$T/initd" ARGOXV6_FLAG="$T/flag" bash "$T/argoxv6.sh" "$@" 2>&1 | sed -e 's/\x1b\[[0-9;]*m//g'; }
+echo '--- -d 诊断输出 ---'
+D6RUN -d | grep -E '监听地址|链接显示地址|出站源地址|本机全局|^   [0-9]\)|conf:|V6_'
+echo '--- 添加一个 v6 节点后的链接 ---'
+printf '2\nb\n36000\n4\n0\n' | D6RUN | grep -oE 'vless://[^ ]*' | head -1
+echo '--- 断言：链接主机必须是 ::1015 ---'
+_lnk=$(printf '2\nb\n36000\n4\n0\n' | D6RUN | grep -oE 'vless://[^ ]*' | head -1)
+case "$_lnk" in
+  *'[2001:df6:11c0:3e2a::1015]'*) echo ' ✓ 链接主机 = 2001:df6:11c0:3e2a::1015' ;;
+  *) echo ' ✗ 链接主机错误:' "$_lnk" ;;
+esac

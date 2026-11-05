@@ -2,12 +2,14 @@
 
 **ArgoX 只管 IPv4，argoxv6 只管 IPv6 —— 互不干扰的 ArgoX 双栈助手；也支持「双栈添加」一次同时输出 V4 + V6 节点**
 
+> **v2.1.2 修复**：IPv6 地址探测不再「抓到哪个算哪个」——按内核出站源地址 → 默认网卡公网 GUA → 全网卡兜底取地址，跳过隐私扩展的临时地址；节点链接的主机默认就用**你实际监听的地址**。并新增 `-d` 诊断（本机全部 IPv6 / 出站源地址 / 在线探测结果 / conf 值一次打全）。
+>
 > **v2.1.0 新增**：菜单 3 / `-b` 双栈添加（同一协议同时绑 IPv4 0.0.0.0 与 IPv6，可复用同一端口，两个节点链接一起出）；菜单 4 / `-l` 按栈同时列出 V4+V6 全部节点并附**含全部节点的 Base64 订阅**；删除支持 `4 / 6 / b`。
 
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/基于-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/系统-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/版本-v2.1.1-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/版本-v2.1.2-brightgreen.svg)](#)
 
 > 这是 [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x 的重写版本。
 > 旧版会与 ArgoX 互相破坏（详见 [为什么旧版会把 ArgoX 搞坏](#为什么旧版会把-argox-搞坏)）；v2.0.0 从架构上彻底解耦：**任一侧出问题，另一侧照常运行**。
@@ -155,7 +157,8 @@ bash argoxv6.sh -b             # 直接进入双栈添加（同一协议同时�
 bash argoxv6.sh -b -p 12300    # 双栈添加并指定起始端口：12300、12301、12302… 依次顺延
 bash argoxv6.sh -l             # 同时输出 IPv4 + IPv6 全部节点链接（含 Base64 订阅）
 bash argoxv6.sh -u             # 卸载
-bash argoxv6.sh -6 2001:db8::1 # 手动指定绑定地址（NAT66 / 多地址场景）
+bash argoxv6.sh -d             # 诊断 IPv6 地址（本机全部地址 / 出站源地址 / 在线探测 / conf）
+bash argoxv6.sh -6 2001:db8::1 # 手动指定 IPv6 地址（监听 + 链接都用它；NAT66 / 多地址场景）
 bash argoxv6.sh -p 65000 -b    # -p 可与 -b / 菜单任意组合
 bash argoxv6.sh -v             # 版本
 bash argoxv6.sh -h             # 帮助（打印脚本头部说明）
@@ -210,11 +213,16 @@ ArgoX 自身的 `inbound.json` / `outbound.json` / `xray.service` **一个都不
 ## 常见问题
 
 **Q：ArgoX 升级 / 重装后要重新修复吗？**
-不需要。drop-in 是独立文件，ArgoX 重写 `xray.service` 冲不掉它。极端情况（unit 被整体删除重建）也只需菜单 5。
+不需要。drop-in 是独立文件，ArgoX 重写 `xray.service` 冲不掉它。极端情况（unit 被整体删除重建）也只需菜单 6（同步/自检修复）。
 
 **Q：在 ArgoX 里改协议，v6 节点会掉线吗？**
-ArgoX 的热更新只认自己 `inbound.json` 里的 tag，会顺带清掉 v6 入站——所以请从**菜单 1** 进 ArgoX（退出自动重挂）；若直接跑了 `argox.sh`，回来点**菜单 5** 即可。
+ArgoX 的热更新只认自己 `inbound.json` 里的 tag，会顺带清掉 v6 入站——所以请从**菜单 1** 进 ArgoX（退出自动重挂）；若直接跑了 `argox.sh`，回来点**菜单 6**（同步）即可。
 
+> **Q：节点里的 IPv6 地址不对（比如机器是 `...::1015`，链接却写成 `...::1`）/ 客户端连不上？**
+先跑 `bash argoxv6.sh -d` 看诊断：
+- 「本机全局 IPv6 地址」里会列出网卡上的全部地址，并标出临时地址（隐私扩展生成、会变，不能用来 bind）；
+- 「出站源地址」是内核实际用这个地址对外通信的那一个，通常就是客户端该连的地址；
+- 「当前监听地址 / 链接显示地址」若与预期不符，用 `-6 <地址>` 强制指定（监听和链接会同时改），再 `-s` 同步一次即可。
 **Q：VPS 换了 IPv6 前缀怎么办？**
 什么都不用做。hook 在每次 Xray 启动时重新探测地址，不一致就自动改写配置，重启一次自愈。
 
@@ -234,7 +242,7 @@ ArgoX 的热更新只认自己 `inbound.json` 里的 tag，会顺带清掉 v6 �
 
 ## 卸载
 
-菜单 8 或 `bash argoxv6.sh -u`：
+菜单 9 或 `bash argoxv6.sh -u`：
 
 1. API 摘除全部 v6 入站；
 2. 移除 drop-in / OpenRC 服务；

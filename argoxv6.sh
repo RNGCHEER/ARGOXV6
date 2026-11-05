@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  argoxv6.sh  v2.1.1  (2026.11.03)
+#  argoxv6.sh  v2.1.2  (2026.11.05)
 #  ArgoX 双栈助手 —— ArgoX 管 IPv4，argoxv6 管 IPv6；并支持「双栈添加」一次输出两栈节点
+#
+#  【v2.1.2 修复：IPv6 地址探测】
+#    · 旧版按「默认路由网卡上的第一个 global 地址」取绑定地址，并直接把在线探测
+#      结果当链接主机 —— 多地址/隐私扩展/多出口的机器上，节点里就可能是另一个地址
+#      （典型：本机是 ...::1015，链接却写成 ...::1，客户端连不上）。
+#    · 现在按「内核出站源地址（ip -6 route get）→ 默认网卡上的公网 GUA → 全网卡兜底」
+#      依次取地址，跳过 temporary 临时地址；链接主机默认就用监听地址本身。
+#    · 新增 -d：把本机全部 IPv6、出站源地址、在线探测结果、conf 值一次打出来。
 #
 #  【v2.1.0 新增：双栈添加】
 #    · 菜单 3 / -b：同一协议同时绑到 IPv4(0.0.0.0) 与 IPv6(本机 GUA)，
@@ -53,7 +61,8 @@
 #    · 回车 = 逐个确认（每个协议单独问，推荐值从 35000 起自动错开）
 #    bash argoxv6.sh -s         一键同步 / 自检修复
 #    bash argoxv6.sh -u         卸载（还原 ArgoX）
-#    bash argoxv6.sh -6 <addr>  手动指定 IPv6 绑定地址
+#    bash argoxv6.sh -d         诊断 IPv6 地址（本机全部地址 / 出站源地址 / 在线探测）
+#    bash argoxv6.sh -6 <addr>  手动指定 IPv6 地址（监听 + 链接都用它）
 #    bash argoxv6.sh -v         版本
 #
 #  环境变量（测试/特殊场景）：
@@ -289,16 +298,85 @@ load_argox() {
 # ---------------------------------------------------------------------------
 # IPv6 地址探测：绑定地址（本机 GUA）与公网地址（写进链接）分开
 # ---------------------------------------------------------------------------
+# 归一化 IPv6 文本：去方括号 / 前缀长度 / scope / CRLF，转小写
+norm_v6() {
+  local _a="${1:-}"
+  _a="${_a%%/*}"
+  _a="${_a#\[}"; _a="${_a%\]}"
+  _a="${_a%%\%*}"
+  _a=$(printf '%s' "$_a" | tr -d ' \t\r\n' | tr 'A-Z' 'a-z')
+  printf '%s' "$_a"
+}
+
+# 2000::/3 公网 GUA 判定（排除 ULA / 链路本地 / 未指定）
+is_public_v6() {
+  local _a _h _v
+  _a=$(norm_v6 "${1:-}")
+  [ -n "$_a" ] || return 1
+  case "$_a" in fd*|fc*|fe8*|fe9*|fea*|feb*|::*|:*) return 1 ;; esac
+  _h="${_a%%:*}"
+  case "$_h" in ''|*[!0-9a-f]*) return 1 ;; esac
+  _v=$((16#$_h))
+  [ "$_v" -ge 8192 ] && [ "$_v" -le 16383 ]
+}
+
+# 本机全部全局 IPv6（小写、去重，每行一个）
+v6_list_global() {
+  ip -6 addr show 2>/dev/null \
+    | sed -n 's#.*inet6 \([0-9a-fA-F:]*\)/[0-9]* .*scope global.*#\1#p' \
+    | tr 'A-Z' 'a-z' | awk 'NF && !seen[$0]++'
+}
+
+v6_is_temporary() {   # 隐私扩展生成的临时地址（会变，不能用来 bind）
+  local _a; _a=$(norm_v6 "${1:-}")
+  [ -n "$_a" ] || return 1
+  ip -6 addr show 2>/dev/null | grep -F "inet6 ${_a}/" | grep -q 'temporary'
+}
+
+v6_owned() {          # 该地址是否真的在本机网卡上
+  local _a; _a=$(norm_v6 "${1:-}")
+  [ -n "$_a" ] || return 1
+  v6_list_global | grep -qx "$_a"
+}
+
+# 去往某地址时内核实际选用的源地址
+v6_src_for() {
+  ip -6 route get "$1" 2>/dev/null | sed -n 's/.* src \([0-9a-fA-F:]*\).*/\1/p' | head -n1
+}
+
 detect_v6_bind() {
-  local _if _a=''
-  _if=$(ip -6 route show default 2>/dev/null | awk '/default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
-  if [ -n "$_if" ]; then
-    _a=$(ip -6 addr show dev "$_if" 2>/dev/null | sed -n 's#.*inet6 \([^/]*\)/[0-9]*.*global.*#\1#p' | head -n1)
+  local _a='' _if='' _x
+  # 1) 出站源地址：VPS 对外通信真正使用的 IPv6（最贴近「客户端能连到的公网地址」）
+  if command -v ip >/dev/null 2>&1; then
+    _a=$(norm_v6 "$(v6_src_for 2606:4700:4700::1111)")
+    [ -z "$_a" ] && _a=$(norm_v6 "$(v6_src_for 2001:4860:4860::8888)")
+    [ -n "$_a" ] && v6_is_temporary "$_a" && _a=''
   fi
+  # 2) 默认路由网卡：优先公网 GUA，跳过临时地址
   if [ -z "$_a" ]; then
-    _a=$(ip -6 addr show scope global 2>/dev/null | sed -n 's#.*inet6 \([^/]*\)/[0-9]*.*global.*#\1#p' | grep -v '^fe80' | head -n1)
+    _if=$(ip -6 route show default 2>/dev/null | awk '/default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    if [ -n "$_if" ]; then
+      for _x in $(ip -6 addr show dev "$_if" 2>/dev/null | sed -n 's#.*inet6 \([0-9a-fA-F:]*\)/[0-9]* .*scope global.*#\1#p'); do
+        _x=$(norm_v6 "$_x")
+        [ -n "$_x" ] || continue
+        v6_is_temporary "$_x" && continue
+        if is_public_v6 "$_x"; then _a="$_x"; break; fi
+        [ -z "$_a" ] && _a="$_x"
+      done
+      # 只剩临时地址时退回用它（聊胜于无）
+      if [ -z "$_a" ]; then
+        _a=$(norm_v6 "$(ip -6 addr show dev "$_if" 2>/dev/null | sed -n 's#.*inet6 \([0-9a-fA-F:]*\)/[0-9]* .*scope global.*#\1#p' | head -n1)")
+      fi
+    fi
   fi
-  echo "$_a"
+  # 3) 全网卡兜底：优先公网 GUA
+  if [ -z "$_a" ]; then
+    for _x in $(v6_list_global); do
+      if is_public_v6 "$_x"; then _a="$_x"; break; fi
+      [ -z "$_a" ] && _a="$_x"
+    done
+  fi
+  printf '%s' "$_a"
 }
 
 detect_v6_pub() {
@@ -309,9 +387,12 @@ detect_v6_pub() {
     _a=$(wget -6 -qO- --tries=1 --timeout=5 https://ipv6.icanhazip.com 2>/dev/null | head -n1)
   fi
   if [ -z "$_a" ] && command -v curl >/dev/null 2>&1; then
+    _a=$(curl -6 -fsS --max-time 5 https://v6.ident.me 2>/dev/null | head -n1)
+  fi
+  if [ -z "$_a" ] && command -v curl >/dev/null 2>&1; then
     _a=$(curl -6 -fsS --max-time 5 https://ip.cloudflare.now.cc 2>/dev/null | awk -F'"' '/"ip"/{print $4; exit}')
   fi
-  echo "$_a" | tr -d '\r\n'
+  norm_v6 "$_a"
 }
 
 is_v6() { [[ "$1" == *:* ]]; }
@@ -319,19 +400,72 @@ is_v6() { [[ "$1" == *:* ]]; }
 # 探测并落盘；地址变化时返回 0（表示需要重建 v6 配置）
 detect_v6() {
   [ -n "${V6_OVERRIDE:-}" ] && return 1     # 命令行强制指定时不自动覆盖
-  local _new _pub _old
+  local _new _pub _old _link=''
   _new=$(detect_v6_bind)
   _pub=$(detect_v6_pub)
-  is_v6 "$_pub" || _pub="$_new"
+  is_v6 "$_pub" || _pub=''
   _old=$(conf_get V6_BIND)
 
-  V6_BIND="${_new:-$_old}"
-  V6_PUB="${_pub:-$V6_BIND}"
+  V6_BIND=$(norm_v6 "${_new:-$_old}")
+  # 链接里发布哪个地址（V6_PUB）：
+  #   · 本机监听的地址本身是公网 GUA → 就用它（客户端连的就是这个 socket）
+  #   · 否则（ULA / NAT66 / 探测不到）→ 用在线探测到的公网地址
+  if is_v6 "$V6_BIND" && is_public_v6 "$V6_BIND"; then
+    _link="$V6_BIND"
+  else
+    _link="${_pub:-$V6_BIND}"
+  fi
+  V6_PUB="$_link"
   [ -n "$V6_BIND" ] && write_conf 'V6_BIND' "$V6_BIND"
   [ -n "$V6_PUB" ]  && write_conf 'V6_PUB'  "$V6_PUB"
 
   [ -n "$_new" ] && [ "$_new" != "$_old" ] && return 0
   return 1
+}
+
+# 地址诊断（-d）：把本机 IPv6 现状一次打清楚，用来判断链接里的地址为什么不对
+net_diag() {
+  local _l _n=0
+  info "============ IPv6 地址诊断 ============"
+  plain " 本机全局 IPv6 地址："
+  if [ -n "$(v6_list_global)" ]; then
+    while IFS= read -r _l; do
+      [ -n "$_l" ] || continue
+      _n=$((_n+1))
+      if v6_is_temporary "$_l"; then
+        plain "   $_n) $_l   [临时/隐私扩展，不能用于 bind]"
+      elif is_public_v6 "$_l"; then
+        plain "   $_n) $_l   [公网 GUA]"
+      else
+        plain "   $_n) $_l   [非公网]"
+      fi
+    done <<-EOF
+$(v6_list_global)
+EOF
+  else
+    plain "   （无）"
+  fi
+  plain " 出站源地址   : $(v6_src_for 2606:4700:4700::1111)"
+  plain " 在线公网探测 : $(detect_v6_pub)"
+  plain " 当前监听地址 : ${V6_BIND:-未检测到}"
+  plain " 链接显示地址 : ${V6_PUB:-${V6_BIND:-未检测到}}"
+  if [ -n "$V6_BIND" ]; then
+    if v6_owned "$V6_BIND"; then
+      info " ✓ 监听地址在本机网卡上"
+    else
+      warning " ✗ 监听地址 $V6_BIND 不在本机网卡上 —— xray 会 bind 失败"
+    fi
+  fi
+  if [ -n "$V6_PUB" ] && [ -n "$V6_BIND" ] && [ "$V6_PUB" != "$V6_BIND" ]; then
+    hint " 提示：链接主机($V6_PUB) 与监听地址($V6_BIND) 不同"
+    hint "       若客户端连不上，用 -6 <地址> 强制指定（会同时改监听与链接）"
+  fi
+  if [ -s "$V6_CONF" ]; then
+    plain " conf: $V6_CONF"
+    grep -E '^(V6_|V4_)' "$V6_CONF" | sed 's/^/   /'
+  fi
+  info "======================================"
+  return 0
 }
 
 # IPv4 地址探测：绑定地址用不上（v4 侧统一 listen 0.0.0.0），
@@ -556,11 +690,27 @@ patch_v4() {
 }
 
 detect_v6() {
-  IF=$(ip -6 route show default 2>/dev/null | awk '/default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
-  if [ -n "$IF" ]; then
-    A=$(ip -6 addr show dev "$IF" 2>/dev/null | sed -n 's#.*inet6 \([^/]*\)/[0-9]*.*global.*#\1#p' | head -n1)
+  A=''
+  # 1) 出站源地址：内核真正用来对外的那个（多地址机器上最可靠）
+  A=$(ip -6 route get 2606:4700:4700::1111 2>/dev/null | sed -n 's/.* src \([0-9a-fA-F:]*\).*/\1/p' | head -n1)
+  [ -z "$A" ] && A=$(ip -6 route get 2001:4860:4860::8888 2>/dev/null | sed -n 's/.* src \([0-9a-fA-F:]*\).*/\1/p' | head -n1)
+  # 隐私扩展的临时地址会变，不能用来 bind
+  if [ -n "$A" ] && ip -6 addr show 2>/dev/null | grep -F "inet6 $A/" | grep -q temporary; then A=''; fi
+  # 2) 默认路由网卡：优先公网 GUA（2000::/3），跳过临时地址
+  if [ -z "$A" ]; then
+    IF=$(ip -6 route show default 2>/dev/null | awk '/default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}')
+    if [ -n "$IF" ]; then
+      for X in $(ip -6 addr show dev "$IF" 2>/dev/null | sed -n 's#.*inet6 \([0-9a-fA-F:]*\)/[0-9]* .*scope global.*#\1#p'); do
+        ip -6 addr show 2>/dev/null | grep -F "inet6 $X/" | grep -q temporary && continue
+        case "${X%%:*}" in
+          2*|3*) A="$X"; break ;;
+          *)     [ -z "$A" ] && A="$X" ;;
+        esac
+      done
+    fi
   fi
-  [ -z "$A" ] && A=$(ip -6 addr show scope global 2>/dev/null | sed -n 's#.*inet6 \([^/]*\)/[0-9]*.*global.*#\1#p' | grep -v '^fe80' | head -n1)
+  # 3) 全网卡兜底
+  [ -z "$A" ] && A=$(ip -6 addr show scope global 2>/dev/null | sed -n 's#.*inet6 \([0-9a-fA-F:]*\)/[0-9]* .*scope global.*#\1#p' | grep -v '^fe80' | head -n1)
   echo "$A"
 }
 
@@ -575,7 +725,7 @@ refresh_v6() {
   TMP="$V6_JSON.new.$$"
   "$JQ" --arg a "$OLD" --arg b "$NEW" '(.inbounds[]? | select((.tag // "") | contains("-v6-")) | select(.listen == $a)) |= (.listen = $b)' "$V6_JSON" > "$TMP" 2>/dev/null
   if [ -s "$TMP" ] && "$JQ" empty "$TMP" >/dev/null 2>&1; then mv -f "$TMP" "$V6_JSON"; else rm -f "$TMP"; fi
-  [ -s "$V6_CONF" ] && sed -i "s|^V6_BIND=.*|V6_BIND='$NEW'|" "$V6_CONF" 2>/dev/null
+  [ -s "$V6_CONF" ] && sed -i -e "s|^V6_BIND=.*|V6_BIND='$NEW'|" -e "s|^V6_PUB=.*|V6_PUB='$NEW'|" "$V6_CONF" 2>/dev/null
   return 0
 }
 
@@ -1526,9 +1676,20 @@ status() {
   else
     warning " IPv4 侧      : 双栈中（ArgoX 也能被 IPv6 访问）→ 菜单 5 修复"
   fi
-  plain " IPv6 绑定    : ${V6_BIND:-未检测到}"
-  plain " IPv6 公网    : ${V6_PUB:-同绑定地址}"
+  plain " IPv6 监听    : ${V6_BIND:-未检测到}"
+  plain " IPv6 链接主机: ${V6_PUB:-同监听地址}"
   plain " IPv4 公网    : ${V4_PUB:-未检测到}"
+  plain " 本机 IPv6    : $(v6_list_global | tr '\n' ' ' | sed 's/ *$//')"
+  if [ -n "$V6_BIND" ]; then
+    if v6_owned "$V6_BIND"; then
+      info " ✓ 监听地址在本机网卡上"
+    else
+      warning " ✗ 监听地址 $V6_BIND 不在本机网卡上（xray 会 bind 失败，用 -d 诊断）"
+    fi
+  fi
+  if [ -n "$V6_PUB" ] && [ -n "$V6_BIND" ] && [ "$V6_PUB" != "$V6_BIND" ]; then
+    hint " 提示：链接主机与监听地址不同，客户端连不上时用 -d 诊断或用 -6 指定"
+  fi
   plain " 开机守护     : $(hooks_installed && echo '已安装' || echo '未安装')"
   plain " 监听 API     : $(api_addr 2>/dev/null || echo '未找到')"
   echo ''
@@ -1712,7 +1873,7 @@ main() {
     case "$1" in
       -6) _manual_v6="${2:-}"; shift 2 ;;
       -p) START_PORT="${2:-}"; shift 2 ;;
-      -l|-s|-u|-b|-v|-h|--help)
+      -l|-s|-u|-b|-v|-d|-h|--help)
         [ -z "$_mode" ] && _mode="$1"
         shift ;;
       *) shift ;;
@@ -1726,7 +1887,7 @@ main() {
   fi
 
   case "$_mode" in
-    -v) echo 'argoxv6 v2.1.1'; exit 0 ;;
+    -v) echo 'argoxv6 v2.1.2'; exit 0 ;;
   esac
 
   load_argox
@@ -1746,6 +1907,7 @@ main() {
   detect_v4 >/dev/null 2>&1 || true
 
   case "$_mode" in
+    -d) net_diag ;;
     -l) show_links ;;
     -s) sync_all ;;
     -u) uninstall_all ;;
