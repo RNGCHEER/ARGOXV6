@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/built%20on-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/version-v2.1.0-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/version-v2.1.1-brightgreen.svg)](#)
 
 > A rewrite of [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x.
 > The old version broke ArgoX (see [why the old version broke ArgoX](#why-the-old-version-broke-argox)); v2.0.0 decouples the two sides entirely — **if one side fails, the other keeps running**.
@@ -137,12 +137,21 @@ The first run auto-detects public IPv4 / IPv6 (no public IPv6 → clear warning,
 | 9 | Uninstall |
 | 0 | Exit |
 
+### Port rules
+
+- **Single protocol**: type the port you want at the prompt (e.g. `65000`); Enter uses the suggested value (auto-spread from 35000).
+- **Batch protocols** (`bcdlm` or `a`): you are asked for **one start port**; the rest are allocated sequentially —
+  e.g. start `12300` → `b`=12300, `c`=12301, `d`=12302 …; occupied ports are **skipped automatically with a note** (if 12300 is taken, that protocol moves to 12301 and the next continues at 12302).
+- With dual-stack add the **same start port applies to both IPv4 and IPv6**, and later protocols continue from there.
+- Ports always avoid ArgoX-occupied ports and existing listeners of the same address family, and stay within 1–65535.
+
 Command-line arguments:
 
 ```bash
 bash argoxv6.sh                 # interactive menu
 bash argoxv6.sh -s              # sync / self-check
 bash argoxv6.sh -b              # jump straight into dual-stack add (IPv4 + IPv6 nodes together)
+bash argoxv6.sh -b -p 12300     # dual-stack add with a start port: 12300, 12301, 12302… in order
 bash argoxv6.sh -l              # print all IPv4 + IPv6 links (with Base64 subscription)
 bash argoxv6.sh -u              # uninstall
 bash argoxv6.sh -6 2001:db8::1  # force bind address (NAT66 / multi-address)

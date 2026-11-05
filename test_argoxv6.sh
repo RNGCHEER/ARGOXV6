@@ -126,13 +126,29 @@ jq -r '[.inbounds[] | "\(.tag):\(.listen // "双栈")"] | join(" , ")' "$A/inbou
 
 echo ''
 echo '=================== SESSION 2: 双栈添加 b/m（v4+v6，两侧链接一起出） ==================='
-printf '3\nbm\n\n\n4\n0\n' | RUN 2>&1 | grep -E '双栈|已加入|Base64|vless://|ss://|hysteria2://|trojan://|无效|已被占用'
+printf '3\nbm\n\n\n\n4\n0\n' | RUN 2>&1 | grep -E '双栈|已加入|Base64|vless://|ss://|hysteria2://|trojan://|无效|已被占用'
 echo '--- 监听核对（同一协议 v4/v6 不同 listen）---'
 jq -r '.inbounds[] | "\(.listen)\t\(.port)\t\(.tag)"' "$A/argoxv6.json"
 
 echo ''
+echo '=================== SESSION 2b: 起始端口顺延（双栈 cm，起始 40000） ==================='
+printf '3\ncm\n40000\n4\n0\n' | RUN 2>&1 | grep -E '顺延|已加入|无效|已被占用'
+echo '--- 40000/40001 是否落在两栈 ---'
+jq -r '.inbounds[] | select(.port >= 40000) | "\(.listen)\t\(.port)"' "$A/argoxv6.json"
+
+echo ''
+echo '=================== SESSION 2c: 单协议指定端口（v6 b = 65000） ==================='
+printf '2\nb\n65000\n4\n0\n' | RUN 2>&1 | grep -E '已加入|无效'
+jq -r '.inbounds[] | select(.listen != "0.0.0.0") | select(.port == 65000) | "\(.listen)\t\(.port)\t\(.tag)"' "$A/argoxv6.json"
+
+echo ''
+echo '=================== SESSION 2d: -b -p 36800（CLI 指定起始端口，双栈） ==================='
+printf 'l\n' | RUN -b -p 36800 2>&1 | grep -E '已加入|无效' | head -3
+jq -r '.inbounds[] | select(.port == 36800) | "\(.listen)\t\(.port)"' "$A/argoxv6.json"
+
+echo ''
 echo '=================== SESSION 3: a = 全部添加（v6） ==================='
-printf '2\na\n\n\n\n\n\n\n0\n' | RUN 2>&1 | grep -E '已加入' | head -8
+printf '2\na\n\n\n\n\n\n\n\n0\n' | RUN 2>&1 | grep -E '已加入' | head -8
 
 echo ''
 echo '=================== SESSION 4: 无 ArgoX（非交互）应明确报错 ==================='

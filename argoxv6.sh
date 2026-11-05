@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  argoxv6.sh  v2.1.0  (2026.11.03)
+#  argoxv6.sh  v2.1.1  (2026.11.03)
 #  ArgoX 双栈助手 —— ArgoX 管 IPv4，argoxv6 管 IPv6；并支持「双栈添加」一次输出两栈节点
 #
 #  【v2.1.0 新增：双栈添加】
@@ -43,7 +43,14 @@
 #  用法：
 #    bash argoxv6.sh            交互菜单
 #    bash argoxv6.sh -b         直接进入双栈添加（同一协议同时出 IPv4+IPv6 节点）
+#    bash argoxv6.sh -b -p 12300  双栈添加并指定起始端口：第一个协议 12300，其余依次顺延
 #    bash argoxv6.sh -l         同时输出 IPv4 + IPv6 全部节点链接（含 Base64 订阅）
+
+#  端口规则：
+#    · 单个协议：在端口提示里直接输入想要的端口（如 65000）即可
+#    · 批量协议（bcdlm 或 a）：输入一个起始端口，其余协议按顺序顺延
+#      例：起始 12300 → b=12300、c=12301、d=12302 …（被占用的端口自动跳过并提示）
+#    · 回车 = 逐个确认（每个协议单独问，推荐值从 35000 起自动错开）
 #    bash argoxv6.sh -s         一键同步 / 自检修复
 #    bash argoxv6.sh -u         卸载（还原 ArgoX）
 #    bash argoxv6.sh -6 <addr>  手动指定 IPv6 绑定地址
@@ -69,6 +76,7 @@ INITD_DIR="${INITD_DIR:-/etc/init.d}"
 DROPIN="$SYSTEMD_DIR/xray.service.d/50-argoxv6.conf"
 OPENRC_UNIT="$INITD_DIR/argoxv6"
 FLAG="${ARGOXV6_FLAG:-/run/argoxv6.need-restart}"
+START_PORT=''          # -p <port>：本批协议的起始端口，其余依次顺延
 
 # ArgoX 官方主脚本
 ARGOX_URL='https://raw.githubusercontent.com/fscarmen/ArgoX/main/argox.sh'
@@ -1348,35 +1356,84 @@ add_protocol() {   # $1=fam: 6（默认）| 4 | b（双栈：同一协议同时�
     hint " 未识别，请重输（可选：$PROTO_LETTERS）"
   done
 
-  local _port _sug _o _x
+  # 协议个数
+  local _n=0
+  for _l in $_letters; do _n=$((_n + 1)); done
+
+  # 起始端口：批量时只需给一次，其余协议依次顺延；回车 = 逐个确认
+  local _base=''
+  if [ -n "${START_PORT:-}" ]; then
+    _base="$START_PORT"
+  elif [ "$_n" -gt 1 ]; then
+    reading " 起始端口（回车=逐个确认；填一个端口则本批协议依次顺延，如 12300）" _base ''
+  fi
+  if [ -n "$_base" ]; then
+    if ! [[ "$_base" =~ ^[0-9]+$ ]] || [ "$_base" -lt 1 ] || [ "$_base" -gt 65535 ]; then
+      warning " 起始端口无效：$_base，改为逐个确认。"
+      _base=''
+    fi
+  fi
+
+  local _port _sug _o _x _bad _cand _cursor="$_base" _exp="$_base"
   for _l in $_letters; do
-    if [ "$_dual" = 'yes' ]; then
-      # 双栈：只问一次端口，两侧复用；推荐值需在两侧都空闲
-      _o=$(conf_get "$(item_key 6 "$_l" PORT)")
-      if [ -n "$_o" ] && [ "$_o" = "$(conf_get "$(item_key 4 "$_l" PORT)")" ]; then
-        _sug="$_o"
-      else
-        _sug=$(suggest_port_dual)
-      fi
-      reading " $(proto_desc "$_l") 双栈端口（回车用推荐值）" _port "$_sug"
-      if ! [[ "$_port" =~ ^[0-9]+$ ]] || [ "$_port" -lt 1 ] || [ "$_port" -gt 65535 ]; then
-        warning " 端口无效：$_port，已跳过 $(proto_desc "$_l")。"; continue
-      fi
-      # 两侧都先查冲突，避免只加了一半
-      local _bad='no'
-      for _x in 6 4; do
-        _o=$(conf_get "$(item_key "$_x" "$_l" PORT)")
-        if [ "$_port" != "$_o" ] && is_port_conflict "$_port" "$_x"; then
-          warning " 端口 $_port 在 $(fam_label "$_x") 侧已被占用，已跳过 $(proto_desc "$_l")。"
-          _bad='yes'; break
-        fi
+    _port=''
+    if [ -n "$_base" ]; then
+      # 从游标往后找空闲端口：同批已写入 conf 的条目也会被 list_items 看到
+      _cand="$_cursor"
+      while :; do
+        _bad='no'
+        for _x in $_fams; do
+          _o=$(conf_get "$(item_key "$_x" "$_l" PORT)")
+          [ "$_cand" = "$_o" ] && continue
+          is_port_conflict "$_cand" "$_x" && _bad='yes'
+        done
+        [ "$_bad" = 'no' ] && break
+        _cand=$((_cand + 1))
+        if [ "$_cand" -gt 65535 ]; then _cand=''; break; fi
       done
-      [ "$_bad" = 'yes' ] && continue
+      if [ -z "$_cand" ]; then
+        warning " 端口已用尽，跳过 $(proto_desc "$_l")。"
+        continue
+      fi
+      _port="$_cand"
+      _cursor=$((_port + 1))
+      [ "$_port" != "$_exp" ] && hint " 端口 $_exp 已被占用，$(proto_desc "$_l") 顺延为 $_port"
+      _exp=$((_port + 1))
+    fi
+
+    if [ "$_dual" = 'yes' ]; then
+      if [ -z "$_port" ]; then
+        # 双栈：只问一次端口，两侧复用；推荐值需在两侧都空闲
+        _o=$(conf_get "$(item_key 6 "$_l" PORT)")
+        if [ -n "$_o" ] && [ "$_o" = "$(conf_get "$(item_key 4 "$_l" PORT)")" ]; then
+          _sug="$_o"
+        else
+          _sug=$(suggest_port_dual)
+        fi
+        reading " $(proto_desc "$_l") 双栈端口（回车用推荐值）" _port "$_sug"
+        if ! [[ "$_port" =~ ^[0-9]+$ ]] || [ "$_port" -lt 1 ] || [ "$_port" -gt 65535 ]; then
+          warning " 端口无效：$_port，已跳过 $(proto_desc "$_l")。"; continue
+        fi
+        # 两侧都先查冲突，避免只加了一半
+        _bad='no'
+        for _x in 6 4; do
+          _o=$(conf_get "$(item_key "$_x" "$_l" PORT)")
+          if [ "$_port" != "$_o" ] && is_port_conflict "$_port" "$_x"; then
+            warning " 端口 $_port 在 $(fam_label "$_x") 侧已被占用，已跳过 $(proto_desc "$_l")。"
+            _bad='yes'; break
+          fi
+        done
+        [ "$_bad" = 'yes' ] && continue
+      fi
       add_one 6 "$_l" "$_port" || continue
       add_one 4 "$_l" "$_port" || continue
       _cnt=$((_cnt + 1))
     else
-      add_one "$_fam" "$_l" || continue
+      if [ -n "$_port" ]; then
+        add_one "$_fam" "$_l" "$_port" || continue
+      else
+        add_one "$_fam" "$_l" || continue
+      fi
       _cnt=$((_cnt + 1))
     fi
   done
@@ -1649,17 +1706,27 @@ menu() {
 }
 
 main() {
-  local _manual_v6=''
+  local _manual_v6='' _mode=''
+  # 逐个扫描全部参数（-p 必须能与 -b / 菜单共存，不能遇到旗标就 break）
   while [ $# -gt 0 ]; do
     case "$1" in
       -6) _manual_v6="${2:-}"; shift 2 ;;
-      -l|-s|-u|-b|-v|-h|--help) break ;;
+      -p) START_PORT="${2:-}"; shift 2 ;;
+      -l|-s|-u|-b|-v|-h|--help)
+        [ -z "$_mode" ] && _mode="$1"
+        shift ;;
       *) shift ;;
     esac
   done
+  if [ -n "$START_PORT" ]; then
+    if ! [[ "$START_PORT" =~ ^[0-9]+$ ]] || [ "$START_PORT" -lt 1 ] || [ "$START_PORT" -gt 65535 ]; then
+      warning " -p 端口无效：$START_PORT（已忽略）"
+      START_PORT=''
+    fi
+  fi
 
-  case "${1:-}" in
-    -v) echo 'argoxv6 v2.1.0'; exit 0 ;;
+  case "$_mode" in
+    -v) echo 'argoxv6 v2.1.1'; exit 0 ;;
   esac
 
   load_argox
@@ -1678,7 +1745,7 @@ main() {
   [ -n "$V6_BIND" ] || warning " 未检测到公网 IPv6，v6 侧将不可用。"
   detect_v4 >/dev/null 2>&1 || true
 
-  case "${1:-}" in
+  case "$_mode" in
     -l) show_links ;;
     -s) sync_all ;;
     -u) uninstall_all ;;
