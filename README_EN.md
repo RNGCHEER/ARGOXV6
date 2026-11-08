@@ -5,10 +5,12 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/built%20on-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/version-v2.1.4-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/version-v2.1.5-brightgreen.svg)](#)
 
 > A rewrite of [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x.
 > The old version broke ArgoX (see [why the old version broke ArgoX](#why-the-old-version-broke-argox)); v2.0.0 decouples the two sides entirely — **if one side fails, the other keeps running**.
+>
+> **New in v2.1.5: follow the IPv4 config or stay independent** — menu 11 (or `-f`) toggles between **Follow IPv4** (default: new IPv6 nodes reuse the Reality keys, UUID, SS2022 password, SNI and certificate that ArgoX / argoxv6 already have, so clients trust one set of credentials) and **Fully independent** (own Reality key pair `V6_PRIV` / `V6_PUB`, own self-signed cert in `cert-v6/`, own SNI). **Ports are never inherited** in either mode; after switching you can apply it to existing nodes in one go.
 >
 > **New in v2.1.4: the `argoxv6` command** — the script installs itself into `PATH` (default `/usr/local/bin/argoxv6`), so you can just type `argoxv6` next time instead of remembering the long `bash <(wget ...)` one-liner. Running the one-liner for a newer version refreshes the command automatically (menu 10 installs/updates it manually), and uninstalling removes it. If installation fails it only warns and never blocks anything.
 >
@@ -134,6 +136,9 @@ The first run auto-detects public IPv4 / IPv6 (no public IPv6 → clear warning,
 2. **Menu 2** — add protocols for IPv6 clients (batch input like `bcdlm`, `a` or Enter = all).
 3. **Menu 3** — dual-stack add: one protocol bound to both IPv4 + IPv6 (may share one port);
 4. **Menu 4** — list all IPv4 + IPv6 nodes per stack and copy the Base64 subscription into your client.
+5. **Menu 11** (optional) — decide whether new IPv6 nodes **follow the IPv4 credentials** (keys / UUID / password / SNI / cert; ports excluded). Following is the default.
+
+> Want IPv4 and IPv6 to use **fully separate** protocols and credentials (e.g. v4 on Hysteria2, v6 on Reality, with unrelated keys)? Pick "fully independent" in menu 11, then configure both sides via menus 1 / 2.
 
 ---
 
@@ -151,6 +156,7 @@ The first run auto-detects public IPv4 / IPv6 (no public IPv6 → clear warning,
 | 8 | Show status (including whether each inbound is actually mounted) |
 | 9 | Uninstall (also removes the `argoxv6` command) |
 | 10 | Install / update the `argoxv6` command (type `argoxv6` next time) |
+| 11 | **Whether IPv6 follows the IPv4 config** (follow / fully independent; may apply to existing nodes) |
 | 0 | Exit |
 
 ### Port rules
@@ -159,6 +165,16 @@ The first run auto-detects public IPv4 / IPv6 (no public IPv6 → clear warning,
 - **Batch protocols** (`bcdlm` or `a`): you are asked for **one start port**; the rest are allocated sequentially —
   e.g. start `12300` → `b`=12300, `c`=12301, `d`=12302 …; occupied ports are **skipped automatically with a note** (if 12300 is taken, that protocol moves to 12301 and the next continues at 12302).
 - With dual-stack add the **same start port applies to both IPv4 and IPv6**, and later protocols continue from there.
+Credential sources for new IPv6 nodes (v2.1.5):
+
+| Protocol | What it inherits when following IPv4 | What it uses when independent |
+|---|---|---|
+| b / d | UUID, Reality key pair, SNI, dest, shortId of the matching IPv4 node (argoxv6 or ArgoX) | own `V6_PRIV` / `V6_PUB` key pair + `V6_SNI` (default `www.microsoft.com`) |
+| c / k / l | cert path and SNI (plus path / serviceName) of the matching node | `cert-v6/cert.pem` + `cert-v6/private.key` (CN = `V6_SNI`) |
+| m | SS2022 password of the matching node | a fresh random password |
+
+Source order: ① argoxv6's own IPv4 node of the same protocol → ② ArgoX inbound of the same protocol → ③ ArgoX global settings. **Ports are never inherited in any mode.**
+
 - Ports always avoid ArgoX-occupied ports and existing listeners of the same address family, and stay within 1–65535.
 
 Command-line arguments:
@@ -173,6 +189,9 @@ bash argoxv6.sh -l              # print all IPv4 + IPv6 links (with Base64 subsc
 bash argoxv6.sh -u              # uninstall
 bash argoxv6.sh -d              # diagnose IPv6 addresses (all local / outbound source / probe / conf)
 bash argoxv6.sh -6 2001:db8::1  # force IPv6 address (used for both listen and link; NAT66 / multi-address)
+bash argoxv6.sh -f no           # IPv6 no longer follows IPv4 (own keys / cert / credentials)
+bash argoxv6.sh -f yes          # back to "follow IPv4" (default)
+bash argoxv6.sh -f              # just print the current mode
 bash argoxv6.sh -v              # version
 bash argoxv6.sh -h              # help (print script header)
 ```
@@ -203,7 +222,8 @@ Ports start from **35000** and auto-increment, always avoiding ArgoX-occupied po
 | `/etc/argox/argoxv6-hook.sh` | boot hook, `pre` / `post`, always `exit 0` |
 | `/etc/systemd/system/xray.service.d/50-argoxv6.conf` | only two `-`-prefixed ExecStartPre/Post lines |
 | `/etc/init.d/argoxv6` | standalone OpenRC guard service |
-| `/etc/argox/cert/` | self-signed cert (generated if ArgoX has none) |
+| `/etc/argox/cert/` | self-signed cert (generated if ArgoX has none; reused in "follow IPv4" mode) |
+| `/etc/argox/cert-v6/` | independent IPv6 self-signed cert (only in "fully independent" mode) |
 | `/etc/argox/argoxv6.d/argox.sh` | cached ArgoX script (menu 1) |
 | `/usr/local/bin/argoxv6` | the `argoxv6` command installed by the script itself (removed on uninstall) |
 
@@ -223,6 +243,8 @@ For tests / special cases, override the default paths:
 | `ARGOXV6_FLAG` | `/run/argoxv6.need-restart` | restart flag file |
 | `ARGOXV6_BIN` | auto | full install path of the `argoxv6` command (e.g. `/usr/local/bin/argoxv6`) |
 | `ARGOXV6_BIN_DIR` | `/usr/local/bin /usr/bin /usr/local/sbin /usr/sbin` | candidate directories, first writable one wins |
+
+Relevant keys in `/etc/argox/argoxv6.conf` (normally written by the menu, no need to edit by hand): `FOLLOW_V4=yes|no` (follow IPv4 or not), `V6_PRIV` / `V6_PUB` (independent Reality key pair), `V6_SNI` (independent SNI, default `www.microsoft.com`), `V6_CERT_FILE` / `V6_CERT_KEY` (independent cert paths); per-node overrides look like `ITEM_6_b_SNI`, `ITEM_6_b_PRIV`. Deleting an override falls back to the global default.
 
 ---
 
@@ -247,6 +269,12 @@ No. They are reached through the Cloudflare edge and proxied to `127.0.0.1`; bot
 
 **Will my tunnel / v4 inbounds be modified?**
 No. The v4 hardening changes only the `listen` field and never touches `127.0.0.1` inbounds; if generation fails it aborts and leaves ArgoX as-is.
+
+**Do existing IPv6 nodes change the moment I switch to "fully independent"?**
+No. The switch only affects **newly added** nodes. When toggling, the script asks whether to apply it to the N configured nodes right away; choosing `y` recomputes credentials for each and hot-mounts them. Note that after applying, credentials change, so clients must **re-import the new links** (old links stop working). Choosing `N` leaves existing nodes untouched and only new ones use the new mode.
+
+**Why aren't ports inherited too?**
+Because inheriting ports has no benefit and real risk: ArgoX often puts the same port on several inbounds (e.g. a WS tunnel plus a direct protocol), so copying it to IPv6 would collide with ArgoX's listener. Ports are therefore always allocated independently; you can still set the same port on v4 and v6 explicitly (different address families, so the sockets don't conflict).
 
 **What if I have no public IPv6?**
 The script says so explicitly and writes nothing; ArgoX keeps working.

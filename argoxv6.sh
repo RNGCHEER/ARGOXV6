@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  argoxv6.sh  v2.1.4  (2026.11.08)
+#  argoxv6.sh  v2.1.5  (2026.11.08)
 #  ArgoX 双栈助手 —— ArgoX 管 IPv4，argoxv6 管 IPv6；并支持「双栈添加」一次输出两栈节点
+#
+#  【v2.1.5 新增：IPv6 是否参考 IPv4 配置】
+#    · 开关（菜单 11，或 -f yes / -f no）：IPv6 节点是否复用 IPv4 同协议节点的
+#      UUID、密码、Reality 密钥对、SNI、证书路径、gRPC serviceName / xhttp path。
+#      端口永远不参考 —— v6 侧始终用自己的端口。
+#    · 参考（默认）：先抄 argoxv6 自己的 IPv4 同类节点，没有再抄 ArgoX 的同协议入站，
+#      都没有才用 ArgoX 的全局设置 —— 同一台设备的 v4 / v6 节点凭据一致，导入省事。
+#    · 独立：IPv6 侧自成一套 —— 独立 Reality 密钥对（V6_PRIV / V6_PUB）、
+#      独立自签证书（/etc/argox/cert-v6）、独立 SNI（V6_SNI，默认 www.microsoft.com）。
+#    · 切换后可选「立即套用到已配置节点」（会更换凭据，客户端要重新导入链接）。
+#    · 顺带修复：XHTTP 节点链接里的 path 与入站不一致（链接写 /argoxv6-<字母>，
+#      入站却是 /argoxv6-v<栈>-<字母>），会导致该协议连不上。
 #
 #  【v2.1.4 新增：argoxv6 命令】
 #    · 脚本会把自身装成 PATH 里的命令（默认 /usr/local/bin/argoxv6），
@@ -77,6 +89,9 @@
 #    bash argoxv6.sh -u         卸载（还原 ArgoX）
 #    bash argoxv6.sh -d         诊断 IPv6 地址（本机全部地址 / 出站源地址 / 在线探测）
 #    bash argoxv6.sh -6 <addr>  手动指定 IPv6 地址（监听 + 链接都用它）
+#    bash argoxv6.sh -f         查看 IPv6 是否参考 IPv4 配置（当前设置）
+#    bash argoxv6.sh -f yes     让 IPv6 参考 IPv4（复用凭据 / 密钥 / SNI，端口不参考）
+#    bash argoxv6.sh -f no      让 IPv6 完全独立（自己的密钥 / 证书 / 凭据）
 #    bash argoxv6.sh -v         版本
 #
 #  环境变量（测试/特殊场景）：
@@ -107,7 +122,7 @@ START_PORT=''          # -p <port>：本批协议的起始端口，其余依次�
 # argoxv6 命令（自安装到 PATH，让用户以后直接输 argoxv6 回到菜单）
 # ---------------------------------------------------------------------------
 CLI_NAME='argoxv6'
-SELF_VER='2.1.4'
+SELF_VER='2.1.5'
 CLI_BIN="${ARGOXV6_BIN:-}"                          # 指定完整路径（测试/自定义）
 CLI_DIRS="${ARGOXV6_BIN_DIR:-/usr/local/bin /usr/bin /usr/local/sbin /usr/sbin}"
 SELF_URL='https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh'
@@ -338,6 +353,239 @@ list_items() {
 item_tag() { echo "$NODE_NAME argoxv6-v$1-$(proto_name "$2")"; }   # $1=fam $2=letter
 
 fam_label() { [ "$1" = '4' ] && echo 'IPv4' || echo 'IPv6'; }
+
+# ---------------------------------------------------------------------------
+# IPv4 参考：v6 节点是否复用 IPv4 同协议节点的凭据 / 密钥 / TLS 设置
+#   开关存 argoxv6.conf 的 FOLLOW_V4（yes = 默认 | no），菜单 11 / -f 切换。
+#   端口永远不参考 —— 无论哪种模式，v6 侧都用自己选的端口。
+# ---------------------------------------------------------------------------
+follow_v4() {
+  case "$(conf_get 'FOLLOW_V4')" in
+    no|NO|No|0|off|false|FALSE) echo 'no' ;;
+    *) echo 'yes' ;;
+  esac
+}
+
+follow_label() {
+  if [ "$(follow_v4)" = 'yes' ]; then
+    echo '参考 IPv4（复用凭据/密钥/SNI，端口不参考）'
+  else
+    echo '完全独立（自带密钥/证书/凭据）'
+  fi
+}
+
+jqget() {   # $1=json $2=jq 过滤器（过滤器自己带 // empty）
+  "$JQ" -r "$2" <<< "$1" 2>/dev/null
+}
+
+# 该字母在 ArgoX inbound.json 里对应的入站（同名 tag 优先，其次按协议结构匹配）
+argox_src_json() {   # $1=letter
+  local _l="$1" _j='' _nh=''
+  [ -s "$IB" ] || return 0
+  _j=$(ibjq -c --arg n "$(proto_name "$_l")" '[.inbounds[]? | select((.tag // "") | startswith($n))][0] // empty' 2>/dev/null)
+  if [ -z "$_j" ]; then
+    case "$_l" in
+      b) _nh='(.protocol == "vless") and (.streamSettings.security == "reality") and (.streamSettings.network == "tcp")' ;;
+      d) _nh='(.protocol == "vless") and (.streamSettings.security == "reality") and (.streamSettings.network == "grpc")' ;;
+      c) _nh='.protocol == "hysteria"' ;;
+      k) _nh='(.protocol == "vless") and (.streamSettings.network == "xhttp")' ;;
+      l) _nh='.protocol == "trojan"' ;;
+      m) _nh='.protocol == "shadowsocks"' ;;
+    esac
+    _j=$(ibjq -c "[.inbounds[]? | select($_nh)][0] // empty" 2>/dev/null)
+  fi
+  [ -n "$_j" ] && printf '%s\n' "$_j"
+  return 0
+}
+
+# 写 / 清 per-item 覆盖值（空值 = 删掉该键，回落到 ArgoX 的全局设置）
+item_put() {   # $1=fam $2=letter $3=field $4=value
+  local _k
+  _k=$(item_key "$1" "$2" "$3")
+  if [ -n "${4:-}" ]; then write_conf "$_k" "$4"; else del_conf_prefix "${_k}="; fi
+}
+
+# v6 独立自签证书（与 ArgoX 的 cert/ 分开，放 cert-v6/）
+ensure_cert_v6() {   # $1=SNI；成功设置 V6_CERT_FILE / V6_CERT_KEY 并返回 0
+  local _sni="${1:-www.microsoft.com}" _d="$WORK_DIR/cert-v6"
+  V6_CERT_FILE="$_d/cert.pem"
+  V6_CERT_KEY="$_d/private.key"
+  if [ -s "$V6_CERT_FILE" ] && [ -s "$V6_CERT_KEY" ]; then return 0; fi
+  command -v openssl >/dev/null 2>&1 || return 1
+  mkdir -p "$_d" || return 1
+  info " 正在生成 argoxv6 独立自签证书（CN=$_sni，$WORK_DIR/cert-v6）..."
+  openssl ecparam -genkey -name prime256v1 -out "$V6_CERT_KEY" 2>/dev/null
+  {
+    echo '[req]'
+    echo 'distinguished_name = dn'
+    echo 'x509_extensions = v3'
+    echo 'prompt = no'
+    echo '[dn]'
+    echo "CN = $_sni"
+    echo '[v3]'
+    echo 'subjectAltName = @alt'
+    echo '[alt]'
+    echo "DNS = $_sni"
+  } > "$_d/cert.conf"
+  openssl req -new -x509 -days 36500 -key "$V6_CERT_KEY" -out "$V6_CERT_FILE" \
+    -config "$_d/cert.conf" -subj "/CN=$_sni" -extensions v3 2>/dev/null
+  rm -f "$_d/cert.conf"
+  [ -s "$V6_CERT_FILE" ] && [ -s "$V6_CERT_KEY" ]
+}
+
+# 按开关解析某个节点的凭据 / TLS 材料并写进 conf（端口不参与）
+#   结果提示放在 RESOLVE_SRC（空 = 用 ArgoX 的全局设置）
+resolve_item() {   # $1=fam $2=letter
+  local _f="$1" _l="$2" _mode _j='' _sni='' _dest='' _priv='' _pub='' _sid='' _cf='' _kf='' _svc='' _xp='' _cred='' _pass='' _method='' _kp _df
+  RESOLVE_SRC=''
+  _mode=$(follow_v4)
+
+  # 1) 先清掉旧覆盖值：没有新值就自动回落到 ArgoX 的全局设置
+  for _df in SNI DEST PRIV PUB SID CERTFILE KEYFILE SVC XPATH; do
+    item_put "$_f" "$_l" "$_df" ''
+  done
+  [ "$_f" = '6' ] || return 0      # IPv4 节点本身就是参考源，不做覆盖
+
+  if [ "$_mode" = 'no' ]; then
+    # ---- 独立模式：自己的密钥对 / 自己的证书 / 自己的 SNI ----
+    _sni=$(conf_get 'V6_SNI')
+    if [ -z "$_sni" ]; then
+      _sni='www.microsoft.com'
+      write_conf 'V6_SNI' "$_sni"
+    fi
+    case "$_l" in
+      b|d)
+        _priv=$(conf_get 'V6_PRIV')
+        _pub=$(conf_get 'V6_PUB')
+        if [ -z "$_priv" ] || [ -z "$_pub" ]; then
+          if [ -x "$XRAY" ]; then
+            _kp=$("$XRAY" x25519 2>/dev/null)
+            _priv=$(awk '/[Pp]rivate/{print $NF}' <<< "$_kp")
+            _pub=$(awk '/[Pp]ublic/{print $NF}' <<< "$_kp")
+          fi
+          if [ -n "$_priv" ] && [ -n "$_pub" ]; then
+            write_conf 'V6_PRIV' "$_priv"
+            write_conf 'V6_PUB' "$_pub"
+          else
+            warning " 独立模式：生成 Reality 密钥对失败（$XRAY x25519），本节点暂用 ArgoX 的密钥。"
+          fi
+        fi
+        item_put "$_f" "$_l" PRIV "$_priv"
+        item_put "$_f" "$_l" PUB "$_pub"
+        item_put "$_f" "$_l" SNI "$_sni"
+        item_put "$_f" "$_l" DEST "${_sni}:443"
+        RESOLVE_SRC='argoxv6 独立密钥与 SNI'
+        ;;
+      c|k|l)
+        if ensure_cert_v6 "$_sni"; then
+          item_put "$_f" "$_l" CERTFILE "$V6_CERT_FILE"
+          item_put "$_f" "$_l" KEYFILE "$V6_CERT_KEY"
+          item_put "$_f" "$_l" SNI "$_sni"
+          item_put "$_f" "$_l" XPATH "argoxv6-v${_f}-${_l}"
+          RESOLVE_SRC="argoxv6 独立证书（CN=$_sni）"
+        else
+          warning " 独立模式：无法生成独立证书（缺 openssl？），本节点暂用 ArgoX 的证书。"
+        fi
+        ;;
+      m)
+        RESOLVE_SRC='argoxv6 独立密码'
+        ;;
+    esac
+    return 0
+  fi
+
+  # 2) 参考模式：先看 argoxv6 自己的 IPv4 同类节点
+  if [ -n "$(conf_get "$(item_key 4 "$_l" PORT)")" ]; then
+    RESOLVE_SRC="argoxv6 的 IPv4 $(proto_desc "$_l")"
+    _cred=$(conf_get "$(item_key 4 "$_l" UUID)")
+    _pass=$(conf_get "$(item_key 4 "$_l" PASS)")
+    _sni=$(conf_get "$(item_key 4 "$_l" SNI)")
+    _dest=$(conf_get "$(item_key 4 "$_l" DEST)")
+    _priv=$(conf_get "$(item_key 4 "$_l" PRIV)")
+    _pub=$(conf_get "$(item_key 4 "$_l" PUB)")
+    _sid=$(conf_get "$(item_key 4 "$_l" SID)")
+    _cf=$(conf_get "$(item_key 4 "$_l" CERTFILE)")
+    _kf=$(conf_get "$(item_key 4 "$_l" KEYFILE)")
+    _svc=$(conf_get "$(item_key 4 "$_l" SVC)")
+    _xp=$(conf_get "$(item_key 4 "$_l" XPATH)")
+  else
+    # 3) 再看 ArgoX 里同协议的那个入站
+    _j=$(argox_src_json "$_l")
+    if [ -n "$_j" ]; then
+      RESOLVE_SRC="ArgoX 的 $(proto_name "$_l")"
+      case "$_l" in
+        b|d)
+          _cred=$(jqget "$_j" '.settings.clients[0].id // empty')
+          _sni=$(jqget "$_j" '.streamSettings.realitySettings.serverNames[0] // empty')
+          _dest=$(jqget "$_j" '.streamSettings.realitySettings.dest // empty')
+          _priv=$(jqget "$_j" '.streamSettings.realitySettings.privateKey // empty')
+          _pub=$(jqget "$_j" '.streamSettings.realitySettings.publicKey // empty')
+          _sid=$(jqget "$_j" '[.streamSettings.realitySettings.shortIds[]? | select(. != "")][0] // empty')
+          [ "$_l" = 'd' ] && _svc=$(jqget "$_j" '.streamSettings.grpcSettings.serviceName // empty')
+          ;;
+        c)
+          _cred=$(jqget "$_j" '.settings.clients[0].auth // .settings.clients[0].password // empty')
+          _sni=$(jqget "$_j" '.streamSettings.tlsSettings.serverNames[0] // empty')
+          _cf=$(jqget "$_j" '.streamSettings.tlsSettings.certificates[0].certificateFile // empty')
+          _kf=$(jqget "$_j" '.streamSettings.tlsSettings.certificates[0].keyFile // empty')
+          ;;
+        k)
+          _cred=$(jqget "$_j" '.settings.clients[0].id // empty')
+          _sni=$(jqget "$_j" '.streamSettings.tlsSettings.serverName // empty')
+          _xp=$(jqget "$_j" '.streamSettings.xhttpSettings.path // empty')
+          _cf=$(jqget "$_j" '.streamSettings.tlsSettings.certificates[0].certificateFile // empty')
+          _kf=$(jqget "$_j" '.streamSettings.tlsSettings.certificates[0].keyFile // empty')
+          ;;
+        l)
+          _cred=$(jqget "$_j" '.settings.clients[0].password // empty')
+          _sni=$(jqget "$_j" '.streamSettings.tlsSettings.serverName // empty')
+          _cf=$(jqget "$_j" '.streamSettings.tlsSettings.certificates[0].certificateFile // empty')
+          _kf=$(jqget "$_j" '.streamSettings.tlsSettings.certificates[0].keyFile // empty')
+          ;;
+        m)
+          _method=$(jqget "$_j" '.settings.method // empty')
+          case "$_method" in
+            2022-blake3-aes-128-gcm) _pass=$(jqget "$_j" '.settings.password // empty') ;;
+            *) _pass='' ;;   # 加密方式不同，密码不能照抄
+          esac
+          ;;
+      esac
+    fi
+  fi
+
+  # 4) 抄来的值做基本清洗：证书必须真实存在，否则宁可回落到 ArgoX 的
+  case "$_dest" in
+    '') : ;;
+    *:*) : ;;
+    *) _dest="$_dest:443" ;;
+  esac
+  if [ -n "$_sni" ] && [ -z "$_dest" ]; then
+    case "$_l" in
+      b|d) _dest="${_sni}:443" ;;
+    esac
+  fi
+  [ -n "$_cf" ] && [ ! -s "$_cf" ] && _cf=''
+  [ -n "$_kf" ] && [ ! -s "$_kf" ] && _kf=''
+  if [ -z "$_cf" ] || [ -z "$_kf" ]; then _cf=''; _kf=''; fi
+
+  # 5) 写进 conf（空值由 item_put 删键 → 回落全局）
+  if [ -n "$_cred" ]; then
+    case "$_l" in
+      m) write_conf "$(item_key "$_f" "$_l" PASS)" "$_pass" ;;
+      *) write_conf "$(item_key "$_f" "$_l" UUID)" "$_cred" ;;
+    esac
+  fi
+  item_put "$_f" "$_l" SNI "$_sni"
+  item_put "$_f" "$_l" DEST "$_dest"
+  item_put "$_f" "$_l" PRIV "$_priv"
+  item_put "$_f" "$_l" PUB "$_pub"
+  item_put "$_f" "$_l" SID "$_sid"
+  item_put "$_f" "$_l" CERTFILE "$_cf"
+  item_put "$_f" "$_l" KEYFILE "$_kf"
+  item_put "$_f" "$_l" SVC "$_svc"
+  item_put "$_f" "$_l" XPATH "$_xp"
+  return 0
+}
 
 # ---------------------------------------------------------------------------
 # ArgoX 环境
@@ -1171,7 +1419,20 @@ EOF
 build_block() {   # $1=fam $2=letter $3=port $4=uuid/pass $5=pass(ss)
   local _fam="$1" _l="$2" _port="$3" _cred="$4" _pass="$5" _tag _path _listen
   _tag=$(item_tag "$_fam" "$_l")
-  _path="argoxv6-v$_fam-$_l"
+  # per-item 覆盖值（空 = 回落到 ArgoX 的全局设置；见 resolve_item）
+  local _sni _dest _priv _pub _sid _cf _kf _svc
+  _sni=$(conf_get "$(item_key "$_fam" "$_l" SNI)");      _sni="${_sni:-$TLS_SERVER}"
+  _dest=$(conf_get "$(item_key "$_fam" "$_l" DEST)");    _dest="${_dest:-${_sni}:443}"
+  _priv=$(conf_get "$(item_key "$_fam" "$_l" PRIV)");    _priv="${_priv:-$REALITY_PRIVATE}"
+  _pub=$(conf_get "$(item_key "$_fam" "$_l" PUB)");      _pub="${_pub:-$REALITY_PUBLIC}"
+  _sid=$(conf_get "$(item_key "$_fam" "$_l" SID)")
+  _cf=$(conf_get "$(item_key "$_fam" "$_l" CERTFILE)");  _cf="${_cf:-$CERT_FILE}"
+  _kf=$(conf_get "$(item_key "$_fam" "$_l" KEYFILE)");   _kf="${_kf:-$CERT_KEY}"
+  _svc=$(conf_get "$(item_key "$_fam" "$_l" SVC)");      _svc="${_svc:-grpc}"
+  _path=$(conf_get "$(item_key "$_fam" "$_l" XPATH)");   _path="${_path:-argoxv6-v$_fam-$_l}"
+  # 证书文件缺失时不要写空路径（回落到全局证书）
+  [ -s "$_cf" ] || _cf="$CERT_FILE"
+  [ -s "$_kf" ] || _kf="$CERT_KEY"
   # v6：绑本机公网 IPv6；v4：统一 0.0.0.0（与 v2.0.0 的 v4 加固思路一致，换 IP 也不慌）
   if [ "$_fam" = '4' ]; then _listen='0.0.0.0'; else _listen="$V6_BIND"; fi
   case "$_l" in
@@ -1190,12 +1451,12 @@ build_block() {   # $1=fam $2=letter $3=port $4=uuid/pass $5=pass(ss)
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "$TLS_SERVER:443",
+          "dest": "$_dest",
           "xver": 0,
-          "serverNames": [ "$TLS_SERVER" ],
-          "privateKey": "$REALITY_PRIVATE",
-          "publicKey": "$REALITY_PUBLIC",
-          "shortIds": [ "" ]
+          "serverNames": [ "$_sni" ],
+          "privateKey": "$_priv",
+          "publicKey": "$_pub",
+          "shortIds": [ "$_sid" ]
         }
       },
       "sniffing": { "enabled": true, "destOverride": [ "http", "tls" ] }
@@ -1217,14 +1478,14 @@ JSONEOF
         "security": "reality",
         "realitySettings": {
           "show": false,
-          "dest": "$TLS_SERVER:443",
+          "dest": "$_dest",
           "xver": 0,
-          "serverNames": [ "$TLS_SERVER" ],
-          "privateKey": "$REALITY_PRIVATE",
-          "publicKey": "$REALITY_PUBLIC",
-          "shortIds": [ "" ]
+          "serverNames": [ "$_sni" ],
+          "privateKey": "$_priv",
+          "publicKey": "$_pub",
+          "shortIds": [ "$_sid" ]
         },
-        "grpcSettings": { "serviceName": "grpc", "multiMode": true }
+        "grpcSettings": { "serviceName": "$_svc", "multiMode": true }
       },
       "sniffing": { "enabled": true, "destOverride": [ "http", "tls" ] }
     }
@@ -1244,9 +1505,9 @@ JSONEOF
         "network": "hysteria",
         "security": "tls",
         "tlsSettings": {
-          "serverNames": [ "$TLS_SERVER" ],
+          "serverNames": [ "$_sni" ],
           "alpn": [ "h3" ],
-          "certificates": [ { "certificateFile": "$CERT_FILE", "keyFile": "$CERT_KEY" } ]
+          "certificates": [ { "certificateFile": "$_cf", "keyFile": "$_kf" } ]
         }
       }
     }
@@ -1271,9 +1532,9 @@ JSONEOF
           "path": "/$_path"
         },
         "tlsSettings": {
-          "serverName": "$TLS_SERVER",
+          "serverName": "$_sni",
           "alpn": [ "h3" ],
-          "certificates": [ { "certificateFile": "$CERT_FILE", "keyFile": "$CERT_KEY" } ]
+          "certificates": [ { "certificateFile": "$_cf", "keyFile": "$_kf" } ]
         }
       },
       "sniffing": { "enabled": true, "destOverride": [ "http", "tls", "quic" ] }
@@ -1293,8 +1554,8 @@ JSONEOF
         "network": "tcp",
         "security": "tls",
         "tlsSettings": {
-          "serverName": "$TLS_SERVER",
-          "certificates": [ { "certificateFile": "$CERT_FILE", "keyFile": "$CERT_KEY" } ]
+          "serverName": "$_sni",
+          "certificates": [ { "certificateFile": "$_cf", "keyFile": "$_kf" } ]
         }
       },
       "sniffing": { "enabled": true, "destOverride": [ "http", "tls", "quic" ] }
@@ -1492,6 +1753,13 @@ fw_deny() {    # $1=fam $2=letter $3=port
 # ---------------------------------------------------------------------------
 build_link() {   # $1=fam $2=letter $3=port $4=uuid $5=pass
   local _f="$1" _l="$2" _port="$3" _cred="$4" _pass="$5" _h _n
+  local _sni _pub _sid _sidq='' _xp _svc
+  _sni=$(conf_get "$(item_key "$_f" "$_l" SNI)");  _sni="${_sni:-$TLS_SERVER}"
+  _pub=$(conf_get "$(item_key "$_f" "$_l" PUB)");  _pub="${_pub:-$REALITY_PUBLIC}"
+  _sid=$(conf_get "$(item_key "$_f" "$_l" SID)")
+  _xp=$(conf_get "$(item_key "$_f" "$_l" XPATH)"); _xp="${_xp:-argoxv6-v$_f-$_l}"
+  _svc=$(conf_get "$(item_key "$_f" "$_l" SVC)");  _svc="${_svc:-grpc}"
+  [ -n "$_sid" ] && _sidq="&sid=${_sid}"
   if [ "$_f" = '4' ]; then
     _h=$(host_for_link "${V4_PUB:-$SERVER_IP}")
   else
@@ -1500,11 +1768,11 @@ build_link() {   # $1=fam $2=letter $3=port $4=uuid $5=pass
   _n=$(item_tag "$_f" "$_l")
   _n=${_n// /%20}
   case "$_l" in
-    b) echo "vless://${_cred}@${_h}:${_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${TLS_SERVER}&fp=${FINGER_PRINT}&pbk=${REALITY_PUBLIC}&type=tcp&headerType=none#${_n}" ;;
-    d) echo "vless://${_cred}@${_h}:${_port}?encryption=none&security=reality&sni=${TLS_SERVER}&fp=${FINGER_PRINT}&pbk=${REALITY_PUBLIC}&type=grpc&serviceName=grpc&mode=multi#${_n}" ;;
-    c) echo "hysteria2://${_cred}@${_h}:${_port}/?sni=${TLS_SERVER}&insecure=1&alpn=h3#${_n}" ;;
-    k) echo "vless://${_cred}@${_h}:${_port}?encryption=none&security=tls&sni=${TLS_SERVER}&allowInsecure=1&fp=${FINGER_PRINT}&alpn=h3&type=xhttp&path=%2Fargoxv6-${_l}&mode=stream-up#${_n}" ;;
-    l) echo "trojan://${_cred}@${_h}:${_port}?security=tls&sni=${TLS_SERVER}&allowInsecure=1&fp=${FINGER_PRINT}#${_n}" ;;
+    b) echo "vless://${_cred}@${_h}:${_port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${_sni}&fp=${FINGER_PRINT}&pbk=${_pub}${_sidq}&type=tcp&headerType=none#${_n}" ;;
+    d) echo "vless://${_cred}@${_h}:${_port}?encryption=none&security=reality&sni=${_sni}&fp=${FINGER_PRINT}&pbk=${_pub}${_sidq}&type=grpc&serviceName=${_svc}&mode=multi#${_n}" ;;
+    c) echo "hysteria2://${_cred}@${_h}:${_port}/?sni=${_sni}&insecure=1&alpn=h3#${_n}" ;;
+    k) echo "vless://${_cred}@${_h}:${_port}?encryption=none&security=tls&sni=${_sni}&allowInsecure=1&fp=${FINGER_PRINT}&alpn=h3&type=xhttp&path=%2F${_xp}&mode=stream-up#${_n}" ;;
+    l) echo "trojan://${_cred}@${_h}:${_port}?security=tls&sni=${_sni}&allowInsecure=1&fp=${FINGER_PRINT}#${_n}" ;;
     m) local _b64
        _b64=$(printf '2022-blake3-aes-128-gcm:%s' "$_pass" | base64 | tr -d '\n')
        echo "ss://${_b64}@${_h}:${_port}#${_n}" ;;
@@ -1576,17 +1844,19 @@ add_one() {   # $1=fam $2=letter [$3=port（双栈时由调用方给定）]
     return 1
   fi
 
+  case "$_l" in
+    b|d) ensure_reality ;;
+    c|k|l) ensure_cert ;;
+  esac
+
+  # 按开关决定：复用 IPv4 同协议节点的凭据 / 密钥 / TLS 材料，还是自成一套
+  resolve_item "$_f" "$_l"
   _uuid=$(conf_get "$(item_key "$_f" "$_l" UUID)")
   [ -z "$_uuid" ] && _uuid=$(gen_uuid)
   if [ "$_l" = 'm' ]; then
     _pass=$(conf_get "$(item_key "$_f" "$_l" PASS)")
     [ -z "$_pass" ] && _pass=$(rand_b64_16)
   fi
-
-  case "$_l" in
-    b|d) ensure_reality ;;
-    c|k|l) ensure_cert ;;
-  esac
 
   write_conf "$(item_key "$_f" "$_l" PORT)" "$_port"
   write_conf "$(item_key "$_f" "$_l" UUID)" "$_uuid"
@@ -1599,6 +1869,11 @@ add_one() {   # $1=fam $2=letter [$3=port（双栈时由调用方给定）]
     info " ✓ 已加入 IPv4：$(proto_desc "$_l")  →  0.0.0.0:${_port}"
   else
     info " ✓ 已加入 IPv6：$(proto_desc "$_l")  →  [${V6_BIND}]:${_port}"
+    if [ -n "$RESOLVE_SRC" ]; then
+      hint "   凭据来源：$RESOLVE_SRC（端口独立，未参考）"
+    else
+      hint "   凭据来源：ArgoX 的全局设置（没找到可参考的 IPv4 节点）"
+    fi
   fi
   return 0
 }
@@ -1723,6 +1998,60 @@ add_protocol() {   # $1=fam: 6（默认）| 4 | b（双栈：同一协议同时�
   show_links
 }
 
+toggle_follow() {   # 菜单 11 / -f：v6 是否参考 IPv4 的配置（端口永不参考）
+  local _cur _sel _ok _it _f _l _n=0
+  _cur=$(follow_v4)
+  echo ''
+  info "=========== IPv6 是否参考 IPv4 配置 ==========="
+  if [ "$_cur" = 'yes' ]; then
+    hint " 当前：参考（默认）"
+    plain "  · 新增 IPv6 节点复用 IPv4 同协议节点的：UUID / 密码、Reality 密钥对、"
+    plain "    SNI 与 dest、证书路径、gRPC serviceName、xhttp path"
+    plain "  · 来源优先级：argoxv6 自己的 IPv4 同类节点 → ArgoX 的同协议入站 → ArgoX 全局设置"
+    plain "  · 同一台设备的 v4 / v6 节点凭据一致，客户端导入省事"
+  else
+    hint " 当前：完全独立"
+    plain "  · IPv6 节点用自己的 UUID / 密码、独立 Reality 密钥对（V6_PRIV / V6_PUB）、"
+    plain "    独立自签证书（$WORK_DIR/cert-v6）、独立 SNI（V6_SNI）"
+  fi
+  plain "  · 两种模式都只参考「设置」，端口永远用 IPv6 侧自己的"
+  echo ''
+  hint " 1. 改为「参考 IPv4」（默认）"
+  hint " 2. 改为「完全独立」"
+  hint " 0. 返回（不改）"
+  reading " 请选择" _sel
+  case "$_sel" in
+    1) _sel='yes' ;;
+    2) _sel='no' ;;
+    *) hint " 未修改。"; return 0 ;;
+  esac
+  if [ "$_sel" = "$_cur" ]; then hint " 已经是这个设置，无需修改。"; return 0; fi
+  write_conf 'FOLLOW_V4' "$_sel"
+  info " 已切换：$(follow_label)"
+
+  while IFS= read -r _it; do
+    [ -z "$_it" ] && continue
+    _n=$((_n + 1))
+  done <<< "$(list_items)"
+  if [ "$_n" -eq 0 ]; then
+    hint " 还没有已配置的节点；新设置会在下次添加时生效。"
+    return 0
+  fi
+  reading " 是否立即套用到已配置的 $_n 个节点？（会更换凭据，客户端需重新导入链接）(y/N)" _ok 'n'
+  [ "$_ok" = 'y' ] || { hint " 已跳过；重新添加同名协议（菜单 2 / 3）即可套用新设置。"; return 0; }
+  while IFS= read -r _it; do
+    [ -z "$_it" ] && continue
+    set -- $_it
+    _f="$1" _l="$2"
+    resolve_item "$_f" "$_l"
+    if [ -n "$RESOLVE_SRC" ]; then
+      hint " · $(fam_label "$_f") $(proto_desc "$_l") ← $RESOLVE_SRC"
+    fi
+  done <<< "$(list_items)"
+  info " 重新生成配置并热挂载..."
+  rebuild_json && sync_all
+  show_links
+}
 delete_protocol() {
   local _it _any='no' _n=0 _sel _p _ok _pick='' _targets='' _cnt=0
   local _f _l _port _a _tag
@@ -2025,6 +2354,7 @@ menu() {
     hint " 8. 查看当前状态"
     hint " 9. 卸载 argoxv6"
     hint " 10. 安装 / 更新 argoxv6 命令（以后直接输入 argoxv6 进入）"
+    hint " 11. IPv6 参考 IPv4：$(follow_label)"
     hint " 0. 退出"
     local _c
     reading " 请选择" _c
@@ -2039,6 +2369,7 @@ menu() {
       8) status ;;
       9) uninstall_all; return 0 ;;
       10) install_cli; sleep 1 ;;
+      11) toggle_follow ;;
       0) hint " 已退出。再次输入 argoxv6 即可回到本菜单（提示找不到命令就先执行菜单 10）。"; exit 0 ;;
       *) hint " 无效选项。" ;;
     esac
@@ -2046,13 +2377,14 @@ menu() {
 }
 
 main() {
-  local _manual_v6='' _mode=''
+  local _manual_v6='' _mode='' _follow=''
   # 逐个扫描全部参数（-p 必须能与 -b / 菜单共存，不能遇到旗标就 break）
   while [ $# -gt 0 ]; do
     case "$1" in
       -6) _manual_v6="${2:-}"; shift 2 ;;
       -p) START_PORT="${2:-}"; shift 2 ;;
-      -l|-s|-u|-b|-v|-d|-h|--help)
+      -f) _follow="${2:-}"; shift; [ $# -gt 0 ] && shift ;;
+      -l|-s|-u|-b|-f|-v|-d|-h|--help)
         [ -z "$_mode" ] && _mode="$1"
         shift ;;
       *) shift ;;
@@ -2066,7 +2398,7 @@ main() {
   fi
 
   case "$_mode" in
-    -v) echo 'argoxv6 v2.1.4'; exit 0 ;;
+    -v) echo 'argoxv6 v2.1.5'; exit 0 ;;
   esac
 
   load_argox
@@ -2085,7 +2417,17 @@ main() {
   [ -n "$V6_BIND" ] || warning " 未检测到公网 IPv6，v6 侧将不可用。"
   detect_v4 >/dev/null 2>&1 || true
 
+  # -f [yes|no]：v6 是否参考 IPv4 配置
+  if [ -n "$_follow" ]; then
+    case "$_follow" in
+      yes|on|1|true|y|Y) write_conf 'FOLLOW_V4' 'yes' ;;
+      no|off|0|false|n|N) write_conf 'FOLLOW_V4' 'no' ;;
+      *) warning " -f 取值无效：$_follow（可用 yes / no）" ;;
+    esac
+  fi
+
   case "$_mode" in
+    -f) echo " IPv6 参考 IPv4：$(follow_label)"; exit 0 ;;
     -d) net_diag ;;
     -l) show_links ;;
     -s) sync_all ;;
@@ -2098,7 +2440,7 @@ main() {
       install_cli quiet   # 首次运行就装好 argoxv6 命令；版本变了自动更新
       if [ -n "$(list_items)" ] && [ "$(v4_state)" = 'dual' ]; then
         hint " 提示：ArgoX 当前为双栈监听，v6 设备也能连到 v4 节点。"
-        hint "       菜单 5 可一键加固为 IPv4-only。"
+        hint "       菜单 6 可一键加固为 IPv4-only。"
       fi
       menu
       ;;

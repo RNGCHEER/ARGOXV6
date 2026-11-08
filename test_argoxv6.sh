@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# argoxv6.sh v2.1.4 在 WSL mock 环境下的集成测试
+# argoxv6.sh v2.1.5 在 WSL mock 环境下的集成测试
 set -u
 T=/tmp/argoxtest
 rm -rf "$T"
@@ -234,10 +234,132 @@ echo -n "  版本: "; "$BIN/argoxv6" -v 2>/dev/null || echo "(无法执行)"
 bash -n "$BIN/argoxv6" 2>/dev/null && echo "  语法: OK" || echo "  语法: 失败"
 echo '--- 7b 直接输 argoxv6 进入菜单（不应重复安装）---'
 printf '0\n' | env ARGOXV6_BIN_DIR="$BIN" PATH="$BIN:$T/bin:$PATH" ARGOX_DIR="$A" SYSTEMD_DIR="$T/systemd" INITD_DIR="$T/initd" "$BIN/argoxv6" 2>&1 | sed -e 's/\x1b\[[0-9;]*m//g' | grep -E "argoxv6 · 双栈分工|已退出|命令      :" | head -5
-echo '--- 7c 命令是旧版时自动更新（v2.0.9 → v2.1.4）---'
-sed -i 's/^#  argoxv6\.sh  v2\.1\.4/#  argoxv6.sh  v2.0.9/' "$BIN/argoxv6"
+echo '--- 7c 命令是旧版时自动更新（v2.0.9 → v2.1.5）---'
+sed -i 's/^#  argoxv6\.sh  v2\.1\.5/#  argoxv6.sh  v2.0.9/' "$BIN/argoxv6"
 printf '0\n' | BINRUN | grep -E "已更新|已安装命令"
 echo -n "  更新后版本: "; "$BIN/argoxv6" -v
 echo '--- 7d 卸载时删除命令 ---'
 printf 'y\nn\n' | BINRUN -u | grep -E '已删除命令|已卸载'
 ls "$BIN/argoxv6" 2>/dev/null || echo "  (命令已删除 ✓)"
+
+echo '=================== SESSION 8: v6 是否参考 IPv4 配置（v2.1.5） ==================='
+F="$T/follow"; rm -rf "$F"; mkdir -p "$F/argox"
+cp "$A/xray" "$F/argox/xray"; chmod +x "$F/argox/xray"
+cp "$A/custom" "$F/argox/custom"
+cat > "$F/argox/inbound.json" <<'MOCKEOF'
+{
+  "inbounds": [
+    {
+      "tag": "reality-vision",
+      "port": 30001,
+      "protocol": "vless",
+      "settings": { "clients": [ { "id": "11111111-2222-3333-4444-555555555555", "flow": "xtls-rprx-vision" } ], "decryption": "none" },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "addons.mozilla.org:443",
+          "serverNames": [ "addons.mozilla.org" ],
+          "privateKey": "MOCK_PRIVATE_KEY",
+          "publicKey": "MOCK_PUBLIC_KEY",
+          "shortIds": [ "" ]
+        }
+      }
+    },
+    {
+      "tag": "hysteria2",
+      "port": 30002,
+      "protocol": "hysteria",
+      "settings": { "version": 2, "clients": [ { "auth": "mockauth" } ] },
+      "streamSettings": {
+        "network": "hysteria",
+        "security": "tls",
+        "tlsSettings": {
+          "serverNames": [ "addons.mozilla.org" ],
+          "alpn": [ "h3" ],
+          "certificates": [ { "certificateFile": "/etc/argox/cert/cert.pem", "keyFile": "/etc/argox/cert/private.key" } ]
+        }
+      }
+    },
+    {
+      "tag": "ss2022-direct",
+      "port": 30003,
+      "protocol": "shadowsocks",
+      "settings": { "method": "2022-blake3-aes-128-gcm", "password": "MOCKSSPASS", "network": "tcp,udp" }
+    }
+  ],
+  "api": { "listen": "127.0.0.1:10085" }
+}
+MOCKEOF
+echo '{ "outbounds": [ { "protocol": "freedom", "tag": "direct" } ] }' > "$F/argox/outbound.json"
+FRUN() { env PATH="$T/bin:$PATH" ARGOX_DIR="$F/argox" SYSTEMD_DIR="$T/systemd" INITD_DIR="$T/initd" ARGOXV6_FLAG="$T/flag" ARGOXV6_BIN_DIR="$T/bin_f" bash "$T/argoxv6.sh" -6 2001:db8::1 "$@" 2>&1 | sed -e 's/\x1b\[[0-9;]*m//g'; }
+J="$F/argox/argoxv6.json"
+_id()  { jq -r ".inbounds[] | select(.port==$1) | .settings.clients[0].id" "$J" 2>/dev/null; }
+_pk()  { jq -r ".inbounds[] | select(.port==$1) | .streamSettings.realitySettings.privateKey" "$J" 2>/dev/null; }
+_sni() { jq -r ".inbounds[] | select(.port==$1) | (.streamSettings.realitySettings.serverNames[0] // .streamSettings.tlsSettings.serverNames[0] // .streamSettings.tlsSettings.serverName)" "$J" 2>/dev/null; }
+_cf()  { jq -r ".inbounds[] | select(.port==$1) | .streamSettings.tlsSettings.certificates[0].certificateFile" "$J" 2>/dev/null; }
+
+echo '--- 8a 默认设置 ---'
+FRUN -f | grep -E '参考 IPv4|独立'
+
+echo '--- 8b 参考模式：v6 b 抄 ArgoX 的 reality-vision ---'
+printf '2\nb\n38000\n0\n' | FRUN | grep -E '凭据来源|已加入'
+echo -n '  UUID : '; _id 38000
+echo -n '  pk   : '; _pk 38000
+echo -n '  SNI  : '; _sni 38000
+case "$(_id 38000)" in
+  11111111-2222-3333-4444-555555555555) echo '  ✓ UUID 已参考 ArgoX' ;;
+  *) echo '  ✗ UUID 未参考 ArgoX' ;;
+esac
+case "$(_pk 38000)" in
+  MOCK_PRIVATE_KEY) echo '  ✓ Reality 密钥已参考 ArgoX' ;;
+  *) echo '  ✗ Reality 密钥未参考 ArgoX' ;;
+esac
+echo -n '  链接: '; printf '4\n0\n' | FRUN | grep -oE 'vless://[^ ]*' | head -1
+
+echo '--- 8c 参考模式：v6 m 抄 ArgoX 的 ss2022 密码 ---'
+printf '2\nm\n38001\n0\n' | FRUN | grep -E '凭据来源'
+echo -n '  v6 m 密码: '; grep '^ITEM_6_m_PASS' "$F/argox/argoxv6.conf" | cut -d= -f2- | tr -d "'"
+
+echo '--- 8d 切到「完全独立」---'
+FRUN -f no | grep -E '独立'
+FRUN -f
+
+echo '--- 8e 独立模式：删掉 v6 b 再加回来 ---'
+printf '5\n1\ny\n0\n' | FRUN | grep -E '已删除'
+printf '2\nb\n38000\n0\n' | FRUN | grep -E '凭据来源|已加入'
+echo -n '  UUID : '; _id 38000
+echo -n '  pk   : '; _pk 38000
+echo -n '  SNI  : '; _sni 38000
+case "$(_id 38000)" in
+  11111111-2222-3333-4444-555555555555) echo '  ✗ 独立模式却抄了 ArgoX 的 UUID' ;;
+  '') echo '  ✗ UUID 缺失' ;;
+  *) echo '  ✓ UUID 已独立生成' ;;
+esac
+case "$(_pk 38000)" in
+  MOCKGEN_PRIVATE) echo '  ✓ Reality 密钥独立（V6_PRIV）' ;;
+  *) echo '  ✗ Reality 密钥仍是 ArgoX 的' ;;
+esac
+case "$(_sni 38000)" in
+  www.microsoft.com) echo '  ✓ SNI 独立' ;;
+  *) echo '  ✗ SNI 未独立' ;;
+esac
+
+echo '--- 8f 独立模式：v6 c 用 cert-v6 独立证书 ---'
+printf '2\nc\n38002\n0\n' | FRUN | grep -E '凭据来源|正在生成|已加入'
+echo -n '  证书路径: '; _cf 38002
+test -s "$F/argox/cert-v6/cert.pem" && echo '  ✓ 独立证书已生成' || echo '  ✗ 独立证书缺失'
+
+echo '--- 8g 参考模式：以 argoxv6 自己的 IPv4 节点为源 ---'
+FRUN -f yes >/dev/null 2>&1
+printf '3\nm\n39000\n0\n' | FRUN | grep -E '已加入'
+P4=$(grep '^ITEM_4_m_PASS' "$F/argox/argoxv6.conf" | cut -d= -f2- | tr -d "'")
+printf '2\nm\n39001\n0\n' | FRUN | grep -E '凭据来源'
+P6=$(grep '^ITEM_6_m_PASS' "$F/argox/argoxv6.conf" | cut -d= -f2- | tr -d "'")
+echo "  v4 密码: $P4   v6 密码: $P6"
+[ -n "$P4" ] && [ "$P4" = "$P6" ] && echo '  ✓ 已参考 argoxv6 自己的 IPv4 节点' || echo '  ✗ 未参考 IPv4 节点'
+
+echo '--- 8h 菜单 11 切换并立即套用到已配置节点 ---'
+printf '11\n2\ny\n0\n' | FRUN | grep -E '已切换|←|重新生成|已挂载' | head -10
+echo -n '  套用后 b 的 pk: '; _pk 38000
+echo -n '  conf 条目数  : '; grep -c '^ITEM_' "$F/argox/argoxv6.conf"

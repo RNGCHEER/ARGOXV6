@@ -2,6 +2,8 @@
 
 **ArgoX 只管 IPv4，argoxv6 只管 IPv6 —— 互不干扰的 ArgoX 双栈助手；也支持「双栈添加」一次同时输出 V4 + V6 节点**
 
+> **v2.1.5 新增：IPv6 是否参考 IPv4 配置** —— 菜单 11（或 `-f`）一键切换：**参考 IPv4**（默认，v6 节点直接复用 ArgoX / argoxv6 已有的 Reality 密钥、UUID、SS2022 密码、SNI 与证书，多端只需信任一套凭据）或**完全独立**（v6 自带 Reality 密钥对 `V6_PRIV` / `V6_PUB`、独立自签证书 `cert-v6/`、独立 SNI）。两种模式**端口永不参考**；切换后可选「立即套用到已配置节点」。
+>
 > **v2.1.4 新增：`argoxv6` 命令** —— 脚本跑一次就把自己装成 PATH 里的命令（默认 `/usr/local/bin/argoxv6`），以后在服务器上直接输 `argoxv6` 就能回到菜单，不必再记那一长串 `bash <(wget ...)`。用一键命令跑新版时命令会跟着自动更新（菜单 10 也可手动装 / 更新），卸载时一并删除；装不上只告警，不影响任何已有功能。
 >
 > **v2.1.3 修复**：删除节点不再问「栈 + 协议字母」——直接把已配置节点编号列出来，填序号即可（可一次多个，如 `1 3`；`a`=全部；`0`=取消）。字母填错就退出整个脚本的老毛病没有了：输入非法只重新询问，删前还有一次确认，删完回显剩余节点。
@@ -13,7 +15,7 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/基于-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/系统-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/版本-v2.1.4-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/版本-v2.1.5-brightgreen.svg)](#)
 
 > 这是 [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x 的重写版本。
 > 旧版会与 ArgoX 互相破坏（详见 [为什么旧版会把 ArgoX 搞坏](#为什么旧版会把-argox-搞坏)）；v2.0.0 从架构上彻底解耦：**任一侧出问题，另一侧照常运行**。
@@ -135,6 +137,9 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 2. **菜单 2**：为 IPv6 设备添加协议（支持 `bcdlm` 批量输入，`a` 或回车 = 全部）；
 3. **菜单 3**：双栈添加 —— 同一协议同时出 IPv4 + IPv6 节点（可复用同一端口）；
 4. **菜单 4**：按栈查看 IPv4 + IPv6 全部节点链接，并给出含全部节点的 Base64 订阅，复制到客户端即可。
+5. **菜单 11**（可选）：决定新增的 IPv6 节点是否**参考 IPv4 的凭据**（密钥 / UUID / 密码 / SNI / 证书，端口除外），默认参考。
+
+> 想让 IPv4 与 IPv6 各自走**完全隔离**的协议与凭据（例如 v4 用 Hysteria2、v6 用 Reality，且两边密钥互不相干）——菜单 11 选「完全独立」，再分别用菜单 1 / 2 配置即可。
 
 ---
 
@@ -152,6 +157,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 | 8 | 查看当前状态（含每个入站是否真的挂载） |
 | 9 | 卸载（连带删掉 `argoxv6` 命令） |
 | 10 | 安装 / 更新 `argoxv6` 命令（以后直接输入 `argoxv6` 进入） |
+| 11 | **IPv6 是否参考 IPv4 配置**（参考 / 完全独立；切换后可立即套用到现有节点） |
 | 0 | 退出 |
 
 ### 端口规则
@@ -175,6 +181,9 @@ bash argoxv6.sh -u             # 卸载
 bash argoxv6.sh -d             # 诊断 IPv6 地址（本机全部地址 / 出站源地址 / 在线探测 / conf）
 bash argoxv6.sh -6 2001:db8::1 # 手动指定 IPv6 地址（监听 + 链接都用它；NAT66 / 多地址场景）
 bash argoxv6.sh -p 65000 -b    # -p 可与 -b / 菜单任意组合
+bash argoxv6.sh -f no          # IPv6 不再参考 IPv4（自带密钥/证书/凭据）
+bash argoxv6.sh -f yes         # 恢复「参考 IPv4」（默认）
+bash argoxv6.sh -f             # 只查看当前是哪种模式
 bash argoxv6.sh -v             # 版本
 bash argoxv6.sh -h             # 帮助（打印脚本头部说明）
 ```
@@ -192,6 +201,16 @@ bash argoxv6.sh -h             # 帮助（打印脚本头部说明）
 | l | Trojan Direct | TCP | 自签证书 |
 | m | Shadowsocks 2022 | TCP/UDP | 2022-blake3-aes-128-gcm |
 
+新增 IPv6 节点时的凭据来源（v2.1.5）：
+
+| 协议 | 参考 IPv4 时继承什么 | 完全独立时用什么 |
+|---|---|---|
+| b / d | ArgoX 或 argoxv6 的 IPv4 同类节点的 UUID、Reality 密钥对、SNI、dest、shortId | `V6_PRIV` / `V6_PUB` 独立密钥对 + `V6_SNI`（默认 `www.microsoft.com`） |
+| c / k / l | 对应节点的证书路径、SNI（含 path / serviceName） | `cert-v6/cert.pem` + `cert-v6/private.key`（CN 取 `V6_SNI`） |
+| m | 对应节点的 SS2022 密码 | 独立随机密码 |
+
+来源顺序：① argoxv6 自己的 IPv4 同类节点 → ② ArgoX 的同协议入站 → ③ ArgoX 全局设置。**端口一栏任何模式都不参考**。
+
 端口默认从 **35000** 起自动错开，强制避开 ArgoX 已占用端口及本机其他监听。双栈添加时同一个端口会同时用在 IPv4（`0.0.0.0`）与 IPv6 上 —— 两侧地址族不同，socket 互不冲突。
 
 ---
@@ -205,7 +224,8 @@ bash argoxv6.sh -h             # 帮助（打印脚本头部说明）
 | `/etc/argox/argoxv6-hook.sh` | 开机钩子，`pre` / `post` 两个动作，永远 `exit 0` |
 | `/etc/systemd/system/xray.service.d/50-argoxv6.conf` | 仅两行带 `-` 前缀的 ExecStartPre / Post |
 | `/etc/init.d/argoxv6` | OpenRC 系统的独立守护服务 |
-| `/etc/argox/cert/` | 自签证书（ArgoX 没有时生成） |
+| `/etc/argox/cert/` | 自签证书（ArgoX 没有时生成，「参考 IPv4」模式下复用） |
+| `/etc/argox/cert-v6/` | IPv6 独立自签证书（仅「完全独立」模式生成） |
 | `/etc/argox/argoxv6.d/argox.sh` | ArgoX 主脚本缓存（菜单 1 用） |
 | `/usr/local/bin/argoxv6` | 脚本自身安装的 `argoxv6` 命令（卸载时删除） |
 
@@ -225,6 +245,8 @@ ArgoX 自身的 `inbound.json` / `outbound.json` / `xray.service` **一个都不
 | `ARGOXV6_FLAG` | `/run/argoxv6.need-restart` | 重启标记文件 |
 | `ARGOXV6_BIN` | 自动选择 | `argoxv6` 命令的安装全路径（如 `/usr/local/bin/argoxv6`） |
 | `ARGOXV6_BIN_DIR` | `/usr/local/bin /usr/bin /usr/local/sbin /usr/sbin` | 候选安装目录，按顺序取第一个可写的 |
+
+`/etc/argox/argoxv6.conf` 里的相关键（一般不用手改，菜单会写）：`FOLLOW_V4=yes|no`（是否参考 IPv4）、`V6_PRIV` / `V6_PUB`（独立模式 Reality 密钥对）、`V6_SNI`（独立模式 SNI，默认 `www.microsoft.com`）、`V6_CERT_FILE` / `V6_CERT_KEY`（独立证书路径）；每个节点的覆盖值形如 `ITEM_6_b_SNI`、`ITEM_6_b_PRIV`。删掉某个覆盖键即回到全局默认值。
 
 ---
 
@@ -249,6 +271,12 @@ ArgoX 的热更新只认自己 `inbound.json` 里的 tag，会顺带清掉 v6 �
 
 **Q：隧道 / v4 入站会不会被误改？**
 不会。v4 加固只改 `listen` 一个字段且绝不碰 `127.0.0.1`；生成失败自动放弃并保持 ArgoX 原样。
+
+**Q：切到「完全独立」后，已配置的 IPv6 节点会立刻变吗？**
+不会。开关只影响**之后新增**的节点；切换时脚本会问「是否立即套用到已配置的 N 个节点」，选 `y` 才逐个重算凭据并热挂载。注意：套用后凭据已变，客户端需要**重新导入新链接**（旧链接立即失效）；不选 `y` 则老节点保持原样，只有新加的才用新模式。
+
+**Q：为什么端口不跟着 IPv4 走？**
+因为参考端口没有意义还有风险：ArgoX 常把同一端口给多个入站（例如 WS 隧道与直连协议），v6 若照抄就会和 ArgoX 的监听撞车。所以端口永远独立分配，v4 / v6 可以各自用不同端口，也可以显式指定同一端口（地址族不同，socket 不冲突）。
 
 **Q：只有 IPv4 没有 IPv6 怎么办？**
 脚本会明确提示 v6 侧不可用，不产生任何配置，ArgoX 照常使用。
