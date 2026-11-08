@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  argoxv6.sh  v2.1.3  (2026.11.05)
+#  argoxv6.sh  v2.1.4  (2026.11.08)
 #  ArgoX 双栈助手 —— ArgoX 管 IPv4，argoxv6 管 IPv6；并支持「双栈添加」一次输出两栈节点
+#
+#  【v2.1.4 新增：argoxv6 命令】
+#    · 脚本会把自身装成 PATH 里的命令（默认 /usr/local/bin/argoxv6），
+#      以后在服务器上直接输 argoxv6 就能再次进入本菜单，不必再记那一长串 wget 命令。
+#    · 用一键命令跑新版时，命令会自动更新到这版（菜单 10 也可手动装 / 更新）。
+#    · 卸载（菜单 9 / -u）会把这个命令一并删掉。
+#    · 安装失败只告警，不影响任何已有功能；自定义路径用 ARGOXV6_BIN=/path/argoxv6。
 #
 #  【v2.1.3 修复：删除节点选不中】
 #    · 旧版删除要先填「栈」再填「协议字母」，字母填错/填了列表里没有的项就直接
@@ -55,7 +62,8 @@
 #      退出后自动同步（重钉 v4-only + 重挂 v6 入站）。
 #
 #  用法：
-#    bash argoxv6.sh            交互菜单
+#    argoxv6                    交互菜单（首次运行后自动装好这个命令，见下）
+#    bash argoxv6.sh            交互菜单（没装命令时用这条一键命令）
 #    bash argoxv6.sh -b         直接进入双栈添加（同一协议同时出 IPv4+IPv6 节点）
 #    bash argoxv6.sh -b -p 12300  双栈添加并指定起始端口：第一个协议 12300，其余依次顺延
 #    bash argoxv6.sh -l         同时输出 IPv4 + IPv6 全部节点链接（含 Base64 订阅）
@@ -74,6 +82,8 @@
 #  环境变量（测试/特殊场景）：
 #    ARGOX_DIR=/etc/argox   SYSTEMD_DIR=/etc/systemd/system
 #    INITD_DIR=/etc/init.d  ARGOXV6_FLAG=/run/argoxv6.need-restart
+#    ARGOXV6_BIN=/usr/local/bin/argoxv6   argoxv6 命令的安装路径
+#    ARGOXV6_BIN_DIR='/usr/local/bin /usr/bin'  或：候选安装目录（按顺序取第一个可写的）
 #
 #  许可证：GPL-3.0（与上游 ArgoX 一致）
 # =============================================================================
@@ -92,6 +102,16 @@ DROPIN="$SYSTEMD_DIR/xray.service.d/50-argoxv6.conf"
 OPENRC_UNIT="$INITD_DIR/argoxv6"
 FLAG="${ARGOXV6_FLAG:-/run/argoxv6.need-restart}"
 START_PORT=''          # -p <port>：本批协议的起始端口，其余依次顺延
+
+# ---------------------------------------------------------------------------
+# argoxv6 命令（自安装到 PATH，让用户以后直接输 argoxv6 回到菜单）
+# ---------------------------------------------------------------------------
+CLI_NAME='argoxv6'
+SELF_VER='2.1.4'
+CLI_BIN="${ARGOXV6_BIN:-}"                          # 指定完整路径（测试/自定义）
+CLI_DIRS="${ARGOXV6_BIN_DIR:-/usr/local/bin /usr/bin /usr/local/sbin /usr/sbin}"
+SELF_URL='https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh'
+SELF_URLS="$SELF_URL https://cdn.jsdelivr.net/gh/RNGCHEER/ARGOXV6@main/argoxv6.sh https://ghproxy.net/https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6.sh"
 
 # ArgoX 官方主脚本
 ARGOX_URL='https://raw.githubusercontent.com/fscarmen/ArgoX/main/argox.sh'
@@ -148,6 +168,109 @@ parse_letters() {
 
 proto_name() { eval echo "\$PROTO_NAME_$1"; }
 proto_desc() { eval echo "\$PROTO_DESC_$1"; }
+
+# ---------------------------------------------------------------------------
+# argoxv6 命令自安装
+#   目的：首次跑完这条脚本后，在服务器上直接输 argoxv6 就能再次进入菜单。
+#   做法：把脚本本体装成 PATH 里的可执行文件（默认 /usr/local/bin/argoxv6），
+#         版本不一致时自动更新（所以用一键命令跑新版，命令也会跟着更新）。
+#   任何一步失败都只告警，绝不阻塞主流程。
+# ---------------------------------------------------------------------------
+self_file() {
+  local _f="${BASH_SOURCE[0]:-$0}"
+  case "$_f" in ''|-|bash|sh|*/fd/*) return 0 ;; esac
+  [ -f "$_f" ] || return 0
+  printf '%s/%s\n' "$(cd "$(dirname "$_f")" 2>/dev/null && pwd)" "$(basename "$_f")"
+}
+
+cli_file_ver() {   # 从脚本头部注释取版本号
+  sed -n 's/^#  argoxv6\.sh  v\([0-9][0-9.]*\).*/\1/p' "$1" 2>/dev/null | head -n1
+}
+
+cli_target() {     # 选出可写的安装路径
+  local _d
+  if [ -n "$CLI_BIN" ]; then
+    echo "$CLI_BIN"; return 0
+  fi
+  for _d in $CLI_DIRS; do
+    [ -d "$_d" ] && [ -w "$_d" ] && { echo "$_d/$CLI_NAME"; return 0; }
+  done
+  return 1
+}
+
+fetch_self() {     # $1=输出文件；从 GitHub（含镜像）下载脚本本体
+  local _o="$1" _u _n
+  for _u in $SELF_URLS; do
+    : > "$_o" 2>/dev/null || return 1
+    if command -v wget >/dev/null 2>&1; then
+      wget -qO "$_o" --timeout=20 --tries=1 "$_u" 2>/dev/null || true
+    elif command -v curl >/dev/null 2>&1; then
+      curl -fsSL --max-time 20 "$_u" -o "$_o" 2>/dev/null || true
+    else
+      return 1
+    fi
+    _n=$(wc -c < "$_o" 2>/dev/null | tr -d " ")
+    [ "${_n:-0}" -gt 2000 ] 2>/dev/null && grep -q 'argoxv6' "$_o" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+install_cli() {    # $1=quiet（可选）：不再提示"已是最新"
+  local _q='' _dst _src _tmp _vn _vo _ok='no'
+  [ "${1:-}" = 'quiet' ] && _q='quiet'
+  if ! _dst=$(cli_target); then
+    [ -n "$_q" ] || warning " 没有可写的目录（$CLI_DIRS），无法安装 argoxv6 命令；可用 ARGOXV6_BIN=/usr/local/bin/argoxv6 指定。"
+    return 1
+  fi
+  _vn="$SELF_VER"
+  _vo=$(cli_file_ver "$_dst")
+  if [ -n "$_vo" ] && [ "$_vo" = "$_vn" ]; then
+    [ -n "$_q" ] || hint " argoxv6 命令已是最新：$_dst（v$_vn）"
+    return 0
+  fi
+  _src=$(self_file)
+  _tmp="$_dst.tmp.$$"
+  if [ -n "$_src" ] && [ "$_src" != "$_dst" ] && [ -s "$_src" ]; then
+    cat "$_src" > "$_tmp" 2>/dev/null && _ok='yes'
+  fi
+  if [ "$_ok" = 'no' ]; then
+    if fetch_self "$_tmp"; then _ok='yes'; else _ok='no'; fi
+  fi
+  if [ "$_ok" = 'no' ]; then
+    rm -f "$_tmp"
+    [ -n "$_q" ] || warning " 安装 argoxv6 命令失败（取不到脚本本体：既不是本地文件，wget/curl 下载也失败）。"
+    return 1
+  fi
+  chmod 755 "$_tmp" 2>/dev/null || true
+  if ! mv -f "$_tmp" "$_dst" 2>/dev/null; then
+    rm -f "$_tmp"
+    [ -n "$_q" ] || warning " 写入 $_dst 失败。"
+    return 1
+  fi
+  if [ -n "$_vo" ] && [ "$_vo" != "$_vn" ]; then
+    info " argoxv6 命令已更新：$_dst（v$_vo → v$_vn）"
+  else
+    info " 已安装命令：$_dst —— 以后直接输入 argoxv6 即可再次进入本菜单"
+  fi
+  case ":$PATH:" in
+    *":$(dirname "$_dst"):"*) : ;;
+    *) warning " $(dirname "$_dst") 不在 PATH 中：可用全路径 $_dst 执行，或把它加入 PATH。" ;;
+  esac
+  return 0
+}
+
+cli_label() {      # 菜单里显示当前命令路径
+  local _d
+  if _d=$(cli_target) && [ -f "$_d" ]; then echo "$_d"; else echo '未安装（菜单 10 可装）'; fi
+}
+
+remove_cli() {     # 卸载时删除我们自己装的那份
+  local _dst
+  _dst=$(cli_target) || return 0
+  [ -f "$_dst" ] || return 0
+  [ -n "$(cli_file_ver "$_dst")" ] || return 0
+  rm -f "$_dst" && info " 已删除命令：$_dst"
+}
 
 # ---------------------------------------------------------------------------
 # JSON 工具：ArgoX 的配置文件可能带 // 注释行，jq 前先剥掉
@@ -1818,6 +1941,7 @@ uninstall_all() {
   plain "   · 摘掉所有 argoxv6 入站（IPv4 + IPv6）"
   plain "   · 移除开机守护（systemd drop-in / OpenRC 服务）"
   plain "   · 关闭它为两栈放行的防火墙端口"
+  plain "   · 删除 argoxv6 命令（若装过）"
   plain "   · 可选：把 ArgoX 还原为原生双栈监听"
   echo ''
   local _ok
@@ -1869,6 +1993,9 @@ uninstall_all() {
   rm -f "$V6_JSON" "$V6_JSON.hash" "$V6_CONF" "$HOOK" "$WORK_DIR/.inbound.v4tmp" "$FLAG"
   rm -f "$WORK_DIR"/.v6live.* "$WORK_DIR"/.inbound.hook.* "$WORK_DIR"/.hooktags.* "$WORK_DIR"/.hooklive.* "$WORK_DIR"/.hookadi.* 2>/dev/null
   rm -rf "$STATE_DIR"
+
+  # 6) 删除 argoxv6 命令
+  remove_cli
   info " argoxv6 已卸载，ArgoX 仍可正常使用。"
 }
 
@@ -1886,6 +2013,7 @@ menu() {
     fi
     hint " IPv6 绑定 : ${V6_BIND:-未检测到}"
     hint " Xray      : $(xray_active && echo running || echo stopped)    开机守护: $(hooks_installed && echo 已装 || echo 未装)"
+    hint " 命令      : $(cli_label)"
     echo " -----------------------------------------------------"
     hint " 1. 管理 IPv4 节点（调用 ArgoX 主脚本）"
     hint " 2. 为 IPv6 添加 / 更换协议"
@@ -1896,6 +2024,7 @@ menu() {
     hint " 7. 重新探测 IPv6 地址"
     hint " 8. 查看当前状态"
     hint " 9. 卸载 argoxv6"
+    hint " 10. 安装 / 更新 argoxv6 命令（以后直接输入 argoxv6 进入）"
     hint " 0. 退出"
     local _c
     reading " 请选择" _c
@@ -1909,7 +2038,8 @@ menu() {
       7) refresh_addr ;;
       8) status ;;
       9) uninstall_all; return 0 ;;
-      0) exit 0 ;;
+      10) install_cli; sleep 1 ;;
+      0) hint " 已退出。再次输入 argoxv6 即可回到本菜单（提示找不到命令就先执行菜单 10）。"; exit 0 ;;
       *) hint " 无效选项。" ;;
     esac
   done
@@ -1936,7 +2066,7 @@ main() {
   fi
 
   case "$_mode" in
-    -v) echo 'argoxv6 v2.1.3'; exit 0 ;;
+    -v) echo 'argoxv6 v2.1.4'; exit 0 ;;
   esac
 
   load_argox
@@ -1962,9 +2092,10 @@ main() {
     -u) uninstall_all ;;
     -b) add_protocol b ;;
     -h|--help)
-      sed -n '2,60p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//' || true
+      awk 'NR>1 && /^#/ { sub(/^# ?/, ""); print; next } NR>1 { exit }' "$0" 2>/dev/null || true
       ;;
     *)
+      install_cli quiet   # 首次运行就装好 argoxv6 命令；版本变了自动更新
       if [ -n "$(list_items)" ] && [ "$(v4_state)" = 'dual' ]; then
         hint " 提示：ArgoX 当前为双栈监听，v6 设备也能连到 v4 节点。"
         hint "       菜单 5 可一键加固为 IPv4-only。"

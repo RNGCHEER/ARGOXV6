@@ -2,6 +2,8 @@
 
 **ArgoX 只管 IPv4，argoxv6 只管 IPv6 —— 互不干扰的 ArgoX 双栈助手；也支持「双栈添加」一次同时输出 V4 + V6 节点**
 
+> **v2.1.4 新增：`argoxv6` 命令** —— 脚本跑一次就把自己装成 PATH 里的命令（默认 `/usr/local/bin/argoxv6`），以后在服务器上直接输 `argoxv6` 就能回到菜单，不必再记那一长串 `bash <(wget ...)`。用一键命令跑新版时命令会跟着自动更新（菜单 10 也可手动装 / 更新），卸载时一并删除；装不上只告警，不影响任何已有功能。
+>
 > **v2.1.3 修复**：删除节点不再问「栈 + 协议字母」——直接把已配置节点编号列出来，填序号即可（可一次多个，如 `1 3`；`a`=全部；`0`=取消）。字母填错就退出整个脚本的老毛病没有了：输入非法只重新询问，删前还有一次确认，删完回显剩余节点。
 >
 > **v2.1.2 修复**：IPv6 地址探测不再「抓到哪个算哪个」——按内核出站源地址 → 默认网卡公网 GUA → 全网卡兜底取地址，跳过隐私扩展的临时地址；节点链接的主机默认就用**你实际监听的地址**。并新增 `-d` 诊断（本机全部 IPv6 / 出站源地址 / 在线探测结果 / conf 值一次打全）。
@@ -11,7 +13,7 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/基于-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/系统-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/版本-v2.1.3-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/版本-v2.1.4-brightgreen.svg)](#)
 
 > 这是 [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x 的重写版本。
 > 旧版会与 ArgoX 互相破坏（详见 [为什么旧版会把 ArgoX 搞坏](#为什么旧版会把-argox-搞坏)）；v2.0.0 从架构上彻底解耦：**任一侧出问题，另一侧照常运行**。
@@ -55,6 +57,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv
 ```
 
 > 没装 ArgoX？脚本会检测到并询问是否直接调用 ArgoX 官方脚本安装，装完自动继续。
+
+首次运行结束后，脚本会把自己装成 **`argoxv6` 命令**（默认 `/usr/local/bin/argoxv6`）：
+
+```bash
+argoxv6        # 以后直接这条，回到同一个菜单
+argoxv6 -l     # 参数照旧，全部都支持
+```
+
+> 装不上（只读文件系统 / 非 root）只会告警，功能不受影响，可继续用 `bash argoxv6.sh ...` 或菜单 10 重试。
 
 ---
 
@@ -139,7 +150,8 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 | 6 | 一键同步 / 自检修复 |
 | 7 | 重新探测 IPv6 地址 |
 | 8 | 查看当前状态（含每个入站是否真的挂载） |
-| 9 | 卸载 |
+| 9 | 卸载（连带删掉 `argoxv6` 命令） |
+| 10 | 安装 / 更新 `argoxv6` 命令（以后直接输入 `argoxv6` 进入） |
 | 0 | 退出 |
 
 ### 端口规则
@@ -153,7 +165,8 @@ bash <(wget -qO- https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv6
 命令行参数：
 
 ```bash
-bash argoxv6.sh                # 交互菜单
+argoxv6                        # 交互菜单（首次运行后自动装好这个命令）
+bash argoxv6.sh                # 同上（没装命令时的一键方式）
 bash argoxv6.sh -s             # 同步 / 自检修复
 bash argoxv6.sh -b             # 直接进入双栈添加（同一协议同时出 IPv4 + IPv6）
 bash argoxv6.sh -b -p 12300    # 双栈添加并指定起始端口：12300、12301、12302… 依次顺延
@@ -194,6 +207,7 @@ bash argoxv6.sh -h             # 帮助（打印脚本头部说明）
 | `/etc/init.d/argoxv6` | OpenRC 系统的独立守护服务 |
 | `/etc/argox/cert/` | 自签证书（ArgoX 没有时生成） |
 | `/etc/argox/argoxv6.d/argox.sh` | ArgoX 主脚本缓存（菜单 1 用） |
+| `/usr/local/bin/argoxv6` | 脚本自身安装的 `argoxv6` 命令（卸载时删除） |
 
 ArgoX 自身的 `inbound.json` / `outbound.json` / `xray.service` **一个都不改写**（v4 侧只调整 `listen` 字段，且绝不碰 `127.0.0.1` 入站）。
 
@@ -209,6 +223,8 @@ ArgoX 自身的 `inbound.json` / `outbound.json` / `xray.service` **一个都不
 | `SYSTEMD_DIR` | `/etc/systemd/system` | systemd 单元目录 |
 | `INITD_DIR` | `/etc/init.d` | OpenRC 服务目录 |
 | `ARGOXV6_FLAG` | `/run/argoxv6.need-restart` | 重启标记文件 |
+| `ARGOXV6_BIN` | 自动选择 | `argoxv6` 命令的安装全路径（如 `/usr/local/bin/argoxv6`） |
+| `ARGOXV6_BIN_DIR` | `/usr/local/bin /usr/bin /usr/local/sbin /usr/sbin` | 候选安装目录，按顺序取第一个可写的 |
 
 ---
 
@@ -240,6 +256,12 @@ ArgoX 的热更新只认自己 `inbound.json` 里的 tag，会顺带清掉 v6 �
 **Q：开机守护装了有什么用？**
 装了：服务器重启后 v6 入站自动挂回来（推荐）。不装：只本次生效，重启后需再跑一次 `argoxv6.sh -s`。
 
+**Q：提示 `argoxv6: command not found`？**
+说明命令没装上（多是 `/usr/local/bin` 不可写或脚本不是本地文件且当时断网）。直接跑一次一键命令，或进菜单 10 重装；也可以指定路径：`ARGOXV6_BIN=$HOME/.local/bin/argoxv6 bash argoxv6.sh`（记得把该目录加进 `PATH`）。
+
+**Q：`argoxv6` 命令会不会和 ArgoX 冲突？**
+不会。它是本脚本的副本（GPL-3.0，内容就是 `argoxv6.sh`），和 ArgoX 的 `argox` 命令互不相干；版本更新时只在版本号不一致时覆盖自己这一个文件。
+
 ---
 
 ## 卸载
@@ -250,7 +272,7 @@ ArgoX 的热更新只认自己 `inbound.json` 里的 tag，会顺带清掉 v6 �
 2. 移除 drop-in / OpenRC 服务；
 3. 关闭 v6 防火墙端口；
 4. 可选还原 ArgoX 原生双栈；
-5. 删除自身文件。
+5. 删除自身文件，以及安装的 `argoxv6` 命令。
 
 ArgoX 配置原样保留。
 

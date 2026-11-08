@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# argoxv6.sh v2.1.3 在 WSL mock 环境下的集成测试
+# argoxv6.sh v2.1.4 在 WSL mock 环境下的集成测试
 set -u
 T=/tmp/argoxtest
 rm -rf "$T"
@@ -112,7 +112,7 @@ esac
 MOCKEOF
 chmod +x "$T/bin/"*
 
-RUN() { env PATH="$T/bin:$PATH" ARGOX_DIR="$A" SYSTEMD_DIR="$T/systemd" INITD_DIR="$T/initd" ARGOXV6_FLAG="$T/flag" bash "$T/argoxv6.sh" -6 2001:db8::1 "$@"; }
+RUN() { env PATH="$T/bin:$PATH" ARGOX_DIR="$A" SYSTEMD_DIR="$T/systemd" INITD_DIR="$T/initd" ARGOXV6_FLAG="$T/flag" ARGOXV6_BIN_DIR="$T/bin_install" bash "$T/argoxv6.sh" -6 2001:db8::1 "$@"; }
 
 echo '=================== SESSION 1: 添加 v6-b，看链接 ==================='
 printf '2\nb\n\n4\n0\n' | RUN 2>&1 | tail -22
@@ -223,3 +223,21 @@ case "$_lnk" in
   *'[2001:df6:11c0:3e2a::1015]'*) echo ' ✓ 链接主机 = 2001:df6:11c0:3e2a::1015' ;;
   *) echo ' ✗ 链接主机错误:' "$_lnk" ;;
 esac
+echo ''
+echo '=================== SESSION 7: argoxv6 命令（自安装 / 直接进入 / 版本更新 / 卸载删除） ==================='
+BIN="$T/bin_install"; rm -rf "$BIN"; mkdir -p "$BIN"
+BINRUN() { env PATH="$BIN:$T/bin:$PATH" ARGOX_DIR="$A" SYSTEMD_DIR="$T/systemd" INITD_DIR="$T/initd" ARGOXV6_FLAG="$T/flag" ARGOXV6_BIN_DIR="$BIN" bash "$T/argoxv6.sh" "$@" 2>&1 | sed -e 's/\x1b\[[0-9;]*m//g'; }
+echo '--- 7a 菜单启动时自动安装命令 ---'
+printf '0\n' | BINRUN | grep -E '已安装命令|已更新|argoxv6 命令'
+echo -n "  文件: "; ls -l "$BIN/argoxv6" 2>/dev/null | awk '{print $1, $NF}' || echo "(未安装)"
+echo -n "  版本: "; "$BIN/argoxv6" -v 2>/dev/null || echo "(无法执行)"
+bash -n "$BIN/argoxv6" 2>/dev/null && echo "  语法: OK" || echo "  语法: 失败"
+echo '--- 7b 直接输 argoxv6 进入菜单（不应重复安装）---'
+printf '0\n' | env ARGOXV6_BIN_DIR="$BIN" PATH="$BIN:$T/bin:$PATH" ARGOX_DIR="$A" SYSTEMD_DIR="$T/systemd" INITD_DIR="$T/initd" "$BIN/argoxv6" 2>&1 | sed -e 's/\x1b\[[0-9;]*m//g' | grep -E "argoxv6 · 双栈分工|已退出|命令      :" | head -5
+echo '--- 7c 命令是旧版时自动更新（v2.0.9 → v2.1.4）---'
+sed -i 's/^#  argoxv6\.sh  v2\.1\.4/#  argoxv6.sh  v2.0.9/' "$BIN/argoxv6"
+printf '0\n' | BINRUN | grep -E "已更新|已安装命令"
+echo -n "  更新后版本: "; "$BIN/argoxv6" -v
+echo '--- 7d 卸载时删除命令 ---'
+printf 'y\nn\n' | BINRUN -u | grep -E '已删除命令|已卸载'
+ls "$BIN/argoxv6" 2>/dev/null || echo "  (命令已删除 ✓)"

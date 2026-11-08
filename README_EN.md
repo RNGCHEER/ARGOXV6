@@ -5,10 +5,12 @@
 [![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Based on](https://img.shields.io/badge/built%20on-fscarmen%2FArgoX-orange.svg)](https://github.com/fscarmen/ArgoX)
 [![Platform](https://img.shields.io/badge/platform-Linux%20%7C%20systemd%20%7C%20OpenRC-green.svg)](#)
-[![Version](https://img.shields.io/badge/version-v2.1.3-brightgreen.svg)](#)
+[![Version](https://img.shields.io/badge/version-v2.1.4-brightgreen.svg)](#)
 
 > A rewrite of [RNGCHEER/ARGOXV6](https://github.com/RNGCHEER/ARGOXV6) v1.0.x.
 > The old version broke ArgoX (see [why the old version broke ArgoX](#why-the-old-version-broke-argox)); v2.0.0 decouples the two sides entirely — **if one side fails, the other keeps running**.
+>
+> **New in v2.1.4: the `argoxv6` command** — the script installs itself into `PATH` (default `/usr/local/bin/argoxv6`), so you can just type `argoxv6` next time instead of remembering the long `bash <(wget ...)` one-liner. Running the one-liner for a newer version refreshes the command automatically (menu 10 installs/updates it manually), and uninstalling removes it. If installation fails it only warns and never blocks anything.
 >
 > **Fixed in v2.1.3**: deleting a node no longer asks for "stack + protocol letter" — configured nodes are listed with numbers, just type the number(s) (`1 3`, `a` = all, `0` = cancel). A typo no longer kills the whole script: invalid input re-prompts, there is a confirmation step, and the remaining nodes are echoed afterwards.
 >
@@ -55,6 +57,15 @@ bash <(curl -fsSL https://raw.githubusercontent.com/RNGCHEER/ARGOXV6/main/argoxv
 ```
 
 > ArgoX not installed? The script detects it and offers to install it via the official ArgoX script, then continues automatically.
+
+After the first run the script installs itself as the **`argoxv6` command** (default `/usr/local/bin/argoxv6`):
+
+```bash
+argoxv6        # same menu from now on
+argoxv6 -l     # all flags work the same
+```
+
+> If that fails (read-only filesystem / non-root) it only warns — nothing breaks; keep using `bash argoxv6.sh ...` or retry from menu 10.
 
 ---
 
@@ -138,7 +149,8 @@ The first run auto-detects public IPv4 / IPv6 (no public IPv6 → clear warning,
 | 6 | Sync / self-check & repair |
 | 7 | Re-detect IPv6 address |
 | 8 | Show status (including whether each inbound is actually mounted) |
-| 9 | Uninstall |
+| 9 | Uninstall (also removes the `argoxv6` command) |
+| 10 | Install / update the `argoxv6` command (type `argoxv6` next time) |
 | 0 | Exit |
 
 ### Port rules
@@ -152,7 +164,8 @@ The first run auto-detects public IPv4 / IPv6 (no public IPv6 → clear warning,
 Command-line arguments:
 
 ```bash
-bash argoxv6.sh                 # interactive menu
+argoxv6                         # interactive menu (installed by the first run)
+bash argoxv6.sh                 # same, when the command is not installed yet
 bash argoxv6.sh -s              # sync / self-check
 bash argoxv6.sh -b              # jump straight into dual-stack add (IPv4 + IPv6 nodes together)
 bash argoxv6.sh -b -p 12300     # dual-stack add with a start port: 12300, 12301, 12302… in order
@@ -192,6 +205,7 @@ Ports start from **35000** and auto-increment, always avoiding ArgoX-occupied po
 | `/etc/init.d/argoxv6` | standalone OpenRC guard service |
 | `/etc/argox/cert/` | self-signed cert (generated if ArgoX has none) |
 | `/etc/argox/argoxv6.d/argox.sh` | cached ArgoX script (menu 1) |
+| `/usr/local/bin/argoxv6` | the `argoxv6` command installed by the script itself (removed on uninstall) |
 
 ArgoX's own `inbound.json` / `outbound.json` / `xray.service` are **never rewritten** (the v4 side only adjusts the `listen` field and never touches `127.0.0.1` inbounds).
 
@@ -207,6 +221,8 @@ For tests / special cases, override the default paths:
 | `SYSTEMD_DIR` | `/etc/systemd/system` | systemd unit directory |
 | `INITD_DIR` | `/etc/init.d` | OpenRC service directory |
 | `ARGOXV6_FLAG` | `/run/argoxv6.need-restart` | restart flag file |
+| `ARGOXV6_BIN` | auto | full install path of the `argoxv6` command (e.g. `/usr/local/bin/argoxv6`) |
+| `ARGOXV6_BIN_DIR` | `/usr/local/bin /usr/bin /usr/local/sbin /usr/sbin` | candidate directories, first writable one wins |
 
 ---
 
@@ -238,17 +254,23 @@ The script says so explicitly and writes nothing; ArgoX keeps working.
 **What does the boot guard give me?**
 Installed: v6 inbounds are re-mounted automatically after a reboot (recommended). Not installed: it only takes effect for the current run; after a reboot run `argoxv6.sh -s` again.
 
+**`argoxv6: command not found`?**
+The command was not installed (usually `/usr/local/bin` is not writable, or the script was run from a pipe while offline). Run the one-liner once, or install from menu 10; you can also pick a path: `ARGOXV6_BIN=$HOME/.local/bin/argoxv6 bash argoxv6.sh` (remember to add that directory to `PATH`).
+
+**Does the `argoxv6` command conflict with ArgoX?**
+No. It is just a copy of this script (GPL-3.0, identical to `argoxv6.sh`) and is unrelated to ArgoX's `argox` command; on version changes it only overwrites that single file.
+
 ---
 
 ## Uninstall
 
-Menu 8 or `bash argoxv6.sh -u`:
+Menu 9 or `bash argoxv6.sh -u`:
 
 1. Remove all v6 inbounds via API.
 2. Remove drop-in / OpenRC service.
 3. Close the v6 firewall ports it opened.
 4. Optionally restore ArgoX native dual-stack.
-5. Delete its own files.
+5. Delete its own files and the installed `argoxv6` command.
 
 ArgoX config stays as-is.
 
